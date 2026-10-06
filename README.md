@@ -1,1 +1,1 @@
-# hakaton-kostanai
+# hakaton-kostanai special
