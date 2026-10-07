@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -60,6 +62,14 @@ def setup_database() -> None:
                 produced INTEGER NOT NULL CHECK(produced >= 0),
                 defects INTEGER NOT NULL CHECK(defects >= 0 AND defects <= produced)
             );
+            CREATE TABLE IF NOT EXISTS event_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '{}'
+            );
         """)
         if db.execute("SELECT COUNT(*) FROM line_runs").fetchone()[0] == 0:
             db.executemany("""INSERT INTO line_runs
@@ -102,6 +112,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 class InputModel(BaseModel):
@@ -170,9 +181,6 @@ def date_filters(start: date | None, end: date | None, column: str = "work_date"
 def validate_range(start: date | None, end: date | None) -> None:
     if start and end and start > end:
         raise HTTPException(422, "start_date must be before or equal to end_date")
-
-
-RangeArgs = tuple[date | None, date | None]
 
 
 @app.get("/health")
@@ -270,8 +278,10 @@ def dashboard(start_date: date | None = None, end_date: date | None = None):
     downtimes = rows(f"SELECT * FROM downtimes{downtime_where}", downtime_params)
     with connect() as db:
         monthly_plan = db.execute("SELECT COALESCE(SUM(monthly_plan),0) FROM production_plans").fetchone()[0]
-    planned = sum(r["planned_units"] for r in line_data)
-    actual = sum(r["actual_units"] for r in line_data)
+    # Count finished vehicles once, at final assembly, rather than summing the same units at each stage.
+    finished_line_data = [r for r in line_data if r["line"].startswith("\u0421\u0431\u043e\u0440\u043a\u0430")]
+    planned = sum(r["planned_units"] for r in finished_line_data)
+    actual = sum(r["actual_units"] for r in finished_line_data)
     utilization = sum(r["utilization_percent"] for r in line_data) / len(line_data) if line_data else 0
     defect_total = sum(r["defects"] for r in quality)
     produced_total = sum(r["produced"] for r in quality)
@@ -311,3 +321,159 @@ def dashboard(start_date: date | None = None, end_date: date | None = None):
 @app.get("/api/alerts")
 def get_alerts(start_date: date | None = None, end_date: date | None = None):
     return dashboard(start_date, end_date)["alerts"]
+
+
+AREAS = {
+    "\u0421\u0432\u0430\u0440\u043a\u0430": "\u0421\u0432\u0430\u0440\u043a\u0430-1",
+    "\u041e\u043a\u0440\u0430\u0441\u043a\u0430": "\u041e\u043a\u0440\u0430\u0441\u043a\u0430-1",
+    "\u0421\u0431\u043e\u0440\u043a\u0430": "\u0421\u0431\u043e\u0440\u043a\u0430-1",
+}
+
+
+def log_event(event_type: str, severity: str, title: str, details: dict) -> dict:
+    with connect() as db:
+        cur = db.execute(
+            "INSERT INTO event_log (created_at,event_type,severity,title,details) VALUES (?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(), event_type, severity, title, json.dumps(details, ensure_ascii=False)),
+        )
+        row = db.execute("SELECT * FROM event_log WHERE id=?", (cur.lastrowid,)).fetchone()
+    result = dict(row)
+    result["details"] = json.loads(result["details"])
+    return result
+
+
+class SimulationIn(InputModel):
+    scenario: str = Field(default="normal", pattern="^(normal|failure|quality)$")
+
+
+class EventNoteIn(InputModel):
+    title: str = Field(min_length=1, max_length=160)
+    details: dict = Field(default_factory=dict)
+
+
+@app.get("/")
+def dashboard_page():
+    return FileResponse("static/index.html")
+
+
+@app.get("/api/factory-state")
+def factory_state():
+    latest = rows("SELECT MAX(work_date) AS work_date FROM line_runs")[0]["work_date"]
+    lines = rows("SELECT * FROM line_runs WHERE work_date=? ORDER BY id DESC", (latest,))
+    quality = rows("SELECT * FROM quality_records WHERE work_date=? ORDER BY id DESC", (latest,))
+    downtimes = rows("SELECT * FROM downtimes WHERE work_date=?", (latest,))
+    result = []
+    for area, line_name in AREAS.items():
+        line = next((x for x in lines if x["line"] == line_name), None)
+        q = next((x for x in quality if x["area"] == area), None)
+        area_downs = [x for x in downtimes if x["area"] == area]
+        down_minutes = sum(x["duration_minutes"] for x in area_downs)
+        defect_rate = q["defects"] * 100 / q["produced"] if q and q["produced"] else 0
+        if down_minutes >= MAX_CRITICAL_DOWNTIME_MINUTES or defect_rate > MAX_DEFECT_RATE:
+            status = "critical"
+        elif (line and line["utilization_percent"] < 95) or down_minutes > 0 or defect_rate > 1:
+            status = "warning"
+        else:
+            status = "normal"
+        result.append({
+            "area": area, "line": line_name, "status": status,
+            "utilization_percent": line["utilization_percent"] if line else None,
+            "actual_units": line["actual_units"] if line else 0,
+            "planned_units": line["planned_units"] if line else 0,
+            "defect_rate_percent": round(defect_rate, 2),
+            "downtime_minutes": down_minutes,
+            "equipment": [x["equipment"] for x in area_downs],
+        })
+    return {"date": latest, "areas": result}
+
+
+@app.get("/api/recommendations")
+def recommendations(start_date: date | None = None, end_date: date | None = None):
+    validate_range(start_date, end_date)
+    where, params = date_filters(start_date, end_date)
+    quality = rows(f"SELECT area,SUM(produced) produced,SUM(defects) defects FROM quality_records{where} GROUP BY area", params)
+    downtime = rows(f"SELECT area,SUM(duration_minutes) minutes FROM downtimes{where} GROUP BY area", params)
+    suggestions = []
+    if quality:
+        worst = max(quality, key=lambda x: x["defects"] / x["produced"] if x["produced"] else 0)
+        rate = worst["defects"] * 100 / worst["produced"] if worst["produced"] else 0
+        if rate > MAX_DEFECT_RATE:
+            suggestions.append({"type": "quality", "priority": "high", "area": worst["area"],
+                "title": f"\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043a\u0430\u0447\u0435\u0441\u0442\u0432\u043e \u043d\u0430 \u0443\u0447\u0430\u0441\u0442\u043a\u0435 \u00ab{worst['area']}\u00bb",
+                "reason": f"\u0411\u0440\u0430\u043a {rate:.1f}% \u043f\u0440\u0438 \u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u043e\u043c \u0443\u0440\u043e\u0432\u043d\u0435 {MAX_DEFECT_RATE:.0f}%.",
+                "action": "\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u043e\u0431\u043e\u0440\u0443\u0434\u043e\u0432\u0430\u043d\u0438\u044f \u0438 \u043f\u0435\u0440\u0432\u0443\u044e \u0434\u0435\u0442\u0430\u043b\u044c \u043f\u043e\u0441\u043b\u0435 \u043f\u0435\u0440\u0435\u043d\u0430\u043b\u0430\u0434\u043a\u0438; \u0443\u0441\u0438\u043b\u0438\u0442\u044c \u0432\u044b\u0431\u043e\u0440\u043e\u0447\u043d\u044b\u0439 \u043a\u043e\u043d\u0442\u0440\u043e\u043b\u044c."})
+    if downtime:
+        worst = max(downtime, key=lambda x: x["minutes"])
+        if worst["minutes"]:
+            suggestions.append({"type": "maintenance", "priority": "high" if worst["minutes"] >= 60 else "medium", "area": worst["area"],
+                "title": f"\u0421\u043d\u0438\u0437\u0438\u0442\u044c \u043f\u0440\u043e\u0441\u0442\u043e\u0438 \u043d\u0430 \u0443\u0447\u0430\u0441\u0442\u043a\u0435 \u00ab{worst['area']}\u00bb",
+                "reason": f"\u0417\u0430 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u043f\u0435\u0440\u0438\u043e\u0434 \u043f\u0440\u043e\u0441\u0442\u043e\u0438 \u0441\u043e\u0441\u0442\u0430\u0432\u0438\u043b\u0438 {worst['minutes']} \u043c\u0438\u043d.",
+                "action": "\u0421\u0432\u0435\u0440\u0438\u0442\u044c\u0441\u044f \u0441 \u0436\u0443\u0440\u043d\u0430\u043b\u043e\u043c \u043e\u0442\u043a\u0430\u0437\u043e\u0432 \u0438 \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c \u0440\u0430\u0441\u0445\u043e\u0434\u043d\u044b\u0435 \u0434\u043b\u044f \u043e\u0431\u0441\u043b\u0443\u0436\u0438\u0432\u0430\u043d\u0438\u044f."})
+    if not suggestions:
+        suggestions.append({"type": "operations", "priority": "low", "title": "\u041a\u0440\u0438\u0442\u0438\u0447\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u043d\u0435\u0442", "reason": "\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0435\u043b\u0438 \u0432 \u043f\u0440\u0435\u0434\u0435\u043b\u0430\u0445 \u043a\u043e\u043d\u0442\u0440\u043e\u043b\u044c\u043d\u044b\u0445 \u043f\u043e\u0440\u043e\u0433\u043e\u0432.", "action": "\u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0442\u044c \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u043f\u043e \u0441\u043c\u0435\u043d\u0430\u043c."})
+    return suggestions
+
+
+@app.get("/api/plan-recommendation")
+def plan_recommendation():
+    plans = rows("SELECT * FROM production_plans ORDER BY model")
+    current = sum(item["monthly_plan"] for item in plans)
+    gap = max(0, MONTHLY_OUTPUT_TARGET - current)
+    allocations = []
+    remaining = gap
+    for index, item in enumerate(plans):
+        extra = remaining if index == len(plans) - 1 else round(gap * item["monthly_plan"] / (current or len(plans) or 1))
+        remaining -= extra
+        allocations.append({"id": item["id"], "model": item["model"], "current": item["monthly_plan"], "additional": extra, "suggested": item["monthly_plan"] + extra})
+    return {"current_total": current, "target": MONTHLY_OUTPUT_TARGET, "gap": gap, "allocations": allocations}
+
+
+@app.get("/api/events")
+def get_events(limit: int = 50):
+    if not 1 <= limit <= 200:
+        raise HTTPException(422, "limit must be between 1 and 200")
+    events = rows("SELECT * FROM event_log ORDER BY id DESC LIMIT ?", (limit,))
+    for event in events:
+        event["details"] = json.loads(event["details"])
+    return events
+
+
+@app.post("/api/event-note", status_code=201)
+def add_event_note(record: EventNoteIn):
+    return log_event("operator_action", "info", record.title, record.details)
+
+
+@app.post("/api/simulation/shift")
+def simulate_shift(request: SimulationIn):
+    with connect() as db:
+        last = db.execute("SELECT MAX(work_date) FROM line_runs").fetchone()[0]
+    work_day = max(date.today(), date.fromisoformat(last) + timedelta(days=1)) if last else date.today()
+    scenario = request.scenario
+    values = {"\u0421\u0432\u0430\u0440\u043a\u0430": (118, 96.0), "\u041e\u043a\u0440\u0430\u0441\u043a\u0430": (116, 95.0), "\u0421\u0431\u043e\u0440\u043a\u0430": (120, 98.0)}
+    if scenario == "failure":
+        values["\u041e\u043a\u0440\u0430\u0441\u043a\u0430"] = (78, 67.0)
+    for area, line_name in AREAS.items():
+        actual, utilization = values[area]
+        defects = 8 if scenario == "quality" and area == "\u041e\u043a\u0440\u0430\u0441\u043a\u0430" else {"\u0421\u0432\u0430\u0440\u043a\u0430": 2, "\u041e\u043a\u0440\u0430\u0441\u043a\u0430": 2, "\u0421\u0431\u043e\u0440\u043a\u0430": 1}[area]
+        with connect() as db:
+            db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent) VALUES (?,?,?,?,?,?)", (work_day.isoformat(), line_name, 120, actual, round(8 * utilization / 100, 1), utilization))
+            db.execute("INSERT INTO quality_records (work_date,area,produced,defects) VALUES (?,?,?,?)", (work_day.isoformat(), area, actual, defects))
+    if scenario == "failure":
+        with connect() as db:
+            db.execute("INSERT INTO downtimes (work_date,area,equipment,reason,duration_minutes,is_critical) VALUES (?,?,?,?,?,1)", (work_day.isoformat(), "\u041e\u043a\u0440\u0430\u0441\u043a\u0430", "\u041a\u0430\u043c\u0435\u0440\u0430-02", "\u041f\u0435\u0440\u0435\u0433\u0440\u0435\u0432 \u0432\u0435\u043d\u0442\u0438\u043b\u044f\u0442\u043e\u0440\u0430", 68))
+        log_event("simulation", "critical", "\u0421\u0431\u043e\u0439 \u043a\u0430\u043c\u0435\u0440\u044b \u043e\u043a\u0440\u0430\u0441\u043a\u0438 \u0441\u043c\u043e\u0434\u0435\u043b\u0438\u0440\u043e\u0432\u0430\u043d", {"date": work_day.isoformat(), "equipment": "\u041a\u0430\u043c\u0435\u0440\u0430-02", "duration_minutes": 68})
+    elif scenario == "quality":
+        log_event("simulation", "warning", "\u0420\u043e\u0441\u0442 \u0431\u0440\u0430\u043a\u0430 \u043d\u0430 \u043e\u043a\u0440\u0430\u0441\u043a\u0435 \u0441\u043c\u043e\u0434\u0435\u043b\u0438\u0440\u043e\u0432\u0430\u043d", {"date": work_day.isoformat(), "defects": 8})
+    else:
+        log_event("simulation", "info", "\u0421\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044f \u0441\u043c\u0435\u043d\u044b \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430", {"date": work_day.isoformat(), "scenario": scenario})
+    return {"date": work_day.isoformat(), "scenario": scenario, "dashboard": dashboard(work_day, work_day)}
+
+
+@app.post("/api/simulation/reset")
+def reset_simulation():
+    with connect() as db:
+        for table in ("event_log", "line_runs", "downtimes", "production_plans", "quality_records"):
+            db.execute(f"DELETE FROM {table}")
+    setup_database()
+    log_event("simulation", "info", "\u0414\u0435\u043c\u043e-\u0434\u0430\u043d\u043d\u044b\u0435 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u044b", {})
+    return {"status": "reset"}

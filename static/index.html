@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1715">
+  <title>Allur · Цифровой двойник</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Allur главная"><span class="brand-mark">A</span><span>ALLUR <small>FACTORY OS</small></span></a>
+      <div class="side-label">ПРОИЗВОДСТВО</div>
+      <a class="nav-item active" href="#overview"><span>◫</span> Обзор завода</a>
+      <a class="nav-item" href="#flow"><span>⟶</span> Цифровой двойник</a>
+      <a class="nav-item" href="#quality"><span>◉</span> Качество и простои</a>
+      <a class="nav-item" href="#planning"><span>▤</span> План выпуска</a>
+      <div class="sidebar-bottom"><span class="live-dot"></span><span>Демо-режим</span><span class="side-version">v1.0</span></div>
+    </aside>
+
+    <main class="main-content" id="overview">
+      <header class="topbar">
+        <div class="breadcrumbs">Завод <span>/</span> <b>Цифровой двойник</b></div>
+        <div class="topbar-right"><span class="live-indicator"><i></i> СИМУЛЯЦИЯ АКТИВНА</span><span class="avatar">А</span></div>
+      </header>
+
+      <section class="page-heading">
+        <div><div class="eyebrow">ПРОИЗВОДСТВЕННЫЙ ЦЕНТР · КОСТАНАЙ</div><h1>Обзор завода</h1><p id="subtitle">Сводка по производственным линиям и ключевым показателям</p></div>
+        <div class="heading-actions"><button class="button button-quiet" id="reset-button">↺ Сбросить демо</button><button class="button button-primary" id="shift-button">▶ <span>Симулировать смену</span></button></div>
+      </section>
+
+      <section class="kpi-grid" aria-label="Ключевые показатели">
+        <article class="kpi-card"><div class="kpi-top"><span>OEE · оценка</span><span class="kpi-icon green">◈</span></div><div class="kpi-value"><strong id="kpi-oee">—</strong><span>%</span></div><div class="kpi-foot"><span id="oee-note">Цель ≥ 85%</span><span id="oee-state" class="pill">—</span></div><div class="meter"><i id="oee-meter"></i></div></article>
+        <article class="kpi-card"><div class="kpi-top"><span>Выпуск за период</span><span class="kpi-icon blue">▥</span></div><div class="kpi-value"><strong id="kpi-output">—</strong><span>шт.</span></div><div class="kpi-foot"><span>План: <b id="kpi-planned">—</b> шт.</span><span id="attainment" class="pill">—</span></div><div class="meter blue-meter"><i id="output-meter"></i></div></article>
+        <article class="kpi-card"><div class="kpi-top"><span>Доля брака</span><span class="kpi-icon amber">◉</span></div><div class="kpi-value"><strong id="kpi-defects">—</strong><span>%</span></div><div class="kpi-foot"><span>Допустимо ≤ 2%</span><span id="quality-state" class="pill">—</span></div><div class="meter amber-meter"><i id="quality-meter"></i></div></article>
+        <article class="kpi-card"><div class="kpi-top"><span>Простои оборудования</span><span class="kpi-icon rose">◷</span></div><div class="kpi-value"><strong id="kpi-downtime">—</strong><span>мин.</span></div><div class="kpi-foot"><span>Лимит критичного: 60 мин./сутки</span><span id="downtime-state" class="pill">—</span></div><div class="meter rose-meter"><i id="downtime-meter"></i></div></article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel flow-panel" id="flow">
+          <div class="panel-heading"><div><div class="eyebrow">МОДЕЛЬ ПРОИЗВОДСТВА</div><h2>Поток завода</h2></div><span class="date-chip"><i></i><span id="flow-date">—</span></span></div>
+          <div class="flow-map" id="flow-map"></div>
+          <div class="flow-legend"><span><i class="legend-dot normal"></i>В норме</span><span><i class="legend-dot warning"></i>Внимание</span><span><i class="legend-dot critical"></i>Критично</span><span class="flow-hint">Выберите участок для подробностей</span></div>
+          <div class="area-detail" id="area-detail"><div class="detail-empty">Нажмите на участок на схеме, чтобы открыть его показатели.</div></div>
+        </article>
+
+        <article class="panel insights-panel" id="quality">
+          <div class="panel-heading"><div><div class="eyebrow">ПОДДЕРЖКА РЕШЕНИЙ</div><h2>Что требует внимания</h2></div><span class="count-badge" id="insight-count">0</span></div>
+          <div class="insights-list" id="insights-list"></div>
+          <div class="alert-box" id="alert-box"></div>
+        </article>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel chart-panel"><div class="panel-heading"><div><div class="eyebrow">ДИНАМИКА</div><h2>Выпуск по участкам</h2></div><span class="chart-caption">Шт. за день</span></div><div class="chart-wrap"><canvas id="output-chart" height="210"></canvas></div><div class="chart-legend" id="chart-legend"></div></article>
+        <article class="panel planning-panel" id="planning"><div class="panel-heading"><div><div class="eyebrow">ПЛАНИРОВАНИЕ</div><h2>Месячный план</h2></div><span class="target-chip">Цель 5 500</span></div><div class="plan-summary"><div><strong id="plan-total">—</strong><span>запланировано машин</span></div><div class="plan-gap" id="plan-gap">—</div></div><div class="plan-progress"><div id="plan-progress-fill"></div></div><div class="plan-list" id="plan-list"></div><button class="button button-outline" id="apply-plan-button">Применить предложение +700</button><p class="muted-note">Распределение увеличения рассчитано пропорционально текущему плану моделей.</p></article>
+      </section>
+
+      <section class="panel event-panel"><div class="panel-heading"><div><div class="eyebrow">ХРОНОЛОГИЯ</div><h2>Журнал событий</h2></div><button class="text-button" id="refresh-button">Обновить ↻</button></div><div class="event-list" id="event-list"></div></section>
+      <footer class="footer"><span>ALLUR FACTORY OS <b>·</b> ЦИФРОВОЙ ДВОЙНИК</span><span>Демо на основе тестовых данных кейса</span></footer>
+    </main>
+  </div>
+
+  <dialog id="scenario-dialog" class="scenario-dialog"><form method="dialog"><button class="dialog-close" aria-label="Закрыть">×</button></form><div class="eyebrow">ДЕМО-СЦЕНАРИЙ</div><h2>Выберите событие смены</h2><p>Новые данные добавятся в цифровой двойник и обновят показатели, статусы участков и рекомендации.</p><div class="scenario-options"><button class="scenario-option" data-scenario="normal"><span class="scenario-symbol green">✓</span><span><b>Штатная смена</b><small>Плановая работа без сбоев</small></span><span>→</span></button><button class="scenario-option" data-scenario="failure"><span class="scenario-symbol red">!</span><span><b>Сбой оборудования</b><small>Камера окраски простаивает 68 минут</small></span><span>→</span></button><button class="scenario-option" data-scenario="quality"><span class="scenario-symbol amber">◉</span><span><b>Рост брака</b><small>На окраске обнаружено 8 дефектов</small></span><span>→</span></button></div></dialog>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
