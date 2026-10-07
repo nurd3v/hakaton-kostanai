@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#001e50" />
+    <title>Вход · RO-FACTORY</title>
+    <link rel="icon" href="/static/assets/ro-factory-logo.png" />
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body class="login-body">
+    <main class="login-layout">
+      <section class="login-story">
+        <a class="brand" href="/login"
+          ><img
+            class="brand-logo"
+            src="/static/assets/ro-factory-logo.png"
+            alt=""
+          /><span>RO-FACTORY</span></a
+        >
+        <div>
+          <span class="login-eyebrow">ЦИФРОВОЙ ДВОЙНИК ЗАВОДА</span>
+          <h1>Производство.<br />Под вашим контролем.</h1>
+          <p>
+            Показатели, оборудование и аналитика — в одном рабочем пространстве.
+          </p>
+          <div class="login-features">
+            <span
+              ><i class="fa-solid fa-chart-line" aria-hidden="true"></i>
+              Мониторинг производства</span
+            ><span
+              ><i class="fa-solid fa-gears" aria-hidden="true"></i> Контроль
+              оборудования</span
+            ><span
+              ><i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+              Доступ по ролям</span
+            >
+          </div>
+        </div>
+        <small>RO-FACTORY · Производственный центр</small>
+      </section>
+      <section class="login-card">
+        <div class="login-card-inner">
+          <span class="login-icon"
+            ><i class="fa-solid fa-user-lock" aria-hidden="true"></i
+          ></span>
+          <h2>Вход в аккаунт</h2>
+          <p class="muted">Введите логин и пароль, выданные администратором.</p>
+          <form id="login-form" class="account-form">
+            <label
+              >Логин<input
+                name="username"
+                autocomplete="username"
+                required
+                maxlength="80"
+                placeholder="Ваш логин"
+                autofocus /></label
+            ><label
+              >Пароль
+              <div class="password-field">
+                <input
+                  id="login-password"
+                  name="password"
+                  type="password"
+                  autocomplete="current-password"
+                  required
+                  maxlength="128"
+                  placeholder="Ваш пароль"
+                /><button
+                  type="button"
+                  id="password-toggle"
+                  aria-label="Показать пароль"
+                  aria-pressed="false"
+                >
+                  <i class="fa-solid fa-eye" aria-hidden="true"></i>
+                </button></div
+            ></label>
+            <p id="login-error" class="form-error" role="alert" hidden></p>
+            <button class="submit-button" type="submit" id="login-submit">
+              Войти <i class="fa-solid fa-arrow-right" aria-hidden="true"></i>
+            </button>
+          </form>
+          <p class="login-help">
+            Нет доступа или забыли пароль?<br />Обратитесь к администратору
+            завода.
+          </p>
+        </div>
+      </section>
+    </main>
+    <script src="/static/login.js"></script>
+  </body>
+</html>
