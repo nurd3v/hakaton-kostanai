@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from auth import install_auth, setup_auth
 
 
 DB_PATH = Path(os.getenv("DATABASE_PATH", "factory.db"))
@@ -103,6 +104,7 @@ def setup_database() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     setup_database()
+    setup_auth(connect)
     yield
 
 
@@ -113,6 +115,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory="static"), name="static")
+install_auth(app, connect)
 
 
 class InputModel(BaseModel):
