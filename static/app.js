@@ -3,16 +3,20 @@ const ru = new Intl.NumberFormat('ru-RU');
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const AREA_NAMES = ['\u0421\u0432\u0430\u0440\u043a\u0430', '\u041e\u043a\u0440\u0430\u0441\u043a\u0430', '\u0421\u0431\u043e\u0440\u043a\u0430'];
 let state = {};
+let currentUser = null;
+let csrfToken = "";
+let accountUsers = [];
 let selectedArea = null;
-let currentPage = ["home","production","equipment","incidents","analytics","ai"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "home";
+let currentPage = ["home","production","equipment","incidents","analytics","ai","cabinet","profile"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "home";
 let toastTimer;
 let chartPeriod = "all";
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+  const response = await fetch(path, { headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, ...options });
+  if (response.status === 401) { location.replace('/login'); throw new Error('Сессия завершена. Войдите снова.'); }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || `API request failed (${response.status})`);
+    throw new Error(typeof body.detail === 'string' ? body.detail : 'Проверьте введённые данные');
   }
   return response.status === 204 ? null : response.json();
 }
@@ -53,11 +57,11 @@ function bottleneckPanel(){const areas=state.factory.areas.filter(a=>a.status!==
 function tipsPanel(){return panel('<i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> ИИ Анализ',`<div id="insights-list"></div><div id="alert-box"></div><p class="muted">Рекомендации по порогам качества и простоев. Прогноз риска в API отсутствует.</p>`,`<a class="text-button" href="#ai">Подробнее</a>`);}
 function eventsPanel(){return panel('<i class="fa-solid fa-list-ul" aria-hidden="true"></i> Последние события','<div id="event-list"></div>');}
 function planPanel(){return panel('<i class="fa-solid fa-chart-line" aria-hidden="true"></i> План / факт',`<div class="plan-summary"><div><strong id="plan-total"></strong><span>автомобилей в месяц</span></div><div class="plan-gap" id="plan-gap"></div></div><div class="plan-progress"><div id="plan-progress-fill"></div></div><div id="plan-list"></div><button id="apply-plan-button">Применить предложение</button>`);}
-function equipmentPanel(){const unique=[...new Map(state.downtime.map(d=>[d.area+'|'+d.equipment,d])).values()];return panel('<i class="fa-solid fa-gear" aria-hidden="true"></i> Оборудование',`<div class="subline">Оборудование из журнала простоев · ${unique.length} единиц</div><div class="metrics"><div class="metric"><strong>${ru.format(state.dashboard.kpis.average_utilization_percent)}%</strong><small>Средняя загрузка линий</small></div><div class="metric"><strong>${unique.length}</strong><small>В журнале</small></div><div class="metric"><strong>—</strong><small>Температура: нет данных</small></div></div>`,'<span class="active-label">Активно</span>')+panel('<i class="fa-solid fa-gears" aria-hidden="true"></i> Список оборудования',`<p class="muted">Полного реестра, здоровья оборудования и телеметрии в API нет. Ниже — записи о простоях.</p><div class="table-wrap"><table><thead><tr><th>Название</th><th>Участок</th><th>Последняя запись</th><th>Простой</th><th>Причина</th></tr></thead><tbody>${unique.map(d=>`<tr><td>${esc(d.equipment)}</td><td>${esc(d.area)}</td><td>${esc(dateLabel(d.work_date))}</td><td>${ru.format(d.duration_minutes)} мин</td><td>${esc(d.reason)}</td></tr>`).join('')||'<tr><td colspan="5">Нет записей о простоях оборудования</td></tr>'}</tbody></table></div>`);}
-function incidentsPanel(){return panel('<i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> Аварии и простои',`<div class="table-wrap"><table><thead><tr><th>Дата</th><th>Оборудование</th><th>Причина</th><th>Простой</th><th>Уровень</th></tr></thead><tbody>${state.downtime.map(d=>`<tr><td>${esc(dateLabel(d.work_date))}</td><td>${esc(d.equipment)}<br><small>${esc(d.area)}</small></td><td>${esc(d.reason)}</td><td>${ru.format(d.duration_minutes)} мин</td><td><span class="pill ${d.is_critical?'bad':''}">${d.is_critical?'Критичный':'Обычный'}</span></td></tr>`).join('')||'<tr><td colspan="5">Простоев не зарегистрировано</td></tr>'}</tbody></table></div>`)+eventsPanel();}
+function equipmentPanel(){const unique=[...new Map(state.downtime.map(d=>[d.area+'|'+d.equipment,d])).values()];return panel('<i class="fa-solid fa-gear" aria-hidden="true"></i> Оборудование',`<div class="subline">Оборудование из журнала простоев · ${unique.length} единиц</div><div class="metrics"><div class="metric"><strong>${ru.format(state.dashboard.kpis.average_utilization_percent)}%</strong><small>Средняя загрузка линий</small></div><div class="metric"><strong>${unique.length}</strong><small>В журнале</small></div><div class="metric"><strong>—</strong><small>Температура: нет данных</small></div></div>`,'<span class="active-label">Активно</span>')+panel('<i class="fa-solid fa-gears" aria-hidden="true"></i> Список оборудования',`<p class="muted">Полного реестра, здоровья оборудования и телеметрии в API нет. Ниже — записи о простоях.</p><div tabindex="0" aria-label="Таблица, прокрутка по горизонтали" class="table-wrap"><table><thead><tr><th>Название</th><th>Участок</th><th>Последняя запись</th><th>Простой</th><th>Причина</th></tr></thead><tbody>${unique.map(d=>`<tr><td>${esc(d.equipment)}</td><td>${esc(d.area)}</td><td>${esc(dateLabel(d.work_date))}</td><td>${ru.format(d.duration_minutes)} мин</td><td>${esc(d.reason)}</td></tr>`).join('')||'<tr><td colspan="5">Нет записей о простоях оборудования</td></tr>'}</tbody></table></div>`);}
+function incidentsPanel(){return panel('<i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> Аварии и простои',`<div tabindex="0" aria-label="Таблица, прокрутка по горизонтали" class="table-wrap"><table><thead><tr><th>Дата</th><th>Оборудование</th><th>Причина</th><th>Простой</th><th>Уровень</th></tr></thead><tbody>${state.downtime.map(d=>`<tr><td>${esc(dateLabel(d.work_date))}</td><td>${esc(d.equipment)}<br><small>${esc(d.area)}</small></td><td>${esc(d.reason)}</td><td>${ru.format(d.duration_minutes)} мин</td><td><span class="pill ${d.is_critical?'bad':''}">${d.is_critical?'Критичный':'Обычный'}</span></td></tr>`).join('')||'<tr><td colspan="5">Простоев не зарегистрировано</td></tr>'}</tbody></table></div>`)+eventsPanel();}
 function renderTips(){if(!$('#insights-list'))return;$('#insights-list').innerHTML=state.tips.map(t=>`<article class="insight ${esc(t.priority)}"><span class="insight-mark"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i></span><div><h3>${esc(t.title)}</h3><p>${esc(t.reason)}</p><p><b>Рекомендация:</b> ${esc(t.action)}</p></div></article>`).join(''); const alerts=state.dashboard.alerts;$('#alert-box').className='alert-box'+(alerts.length?' has-alert':'');$('#alert-box').textContent=alerts.length?alerts.map(a=>a.message).join(' · '):'Критичных предупреждений нет';}
-function render(){const k=state.dashboard.kpis;$('#kpi-output').textContent=ru.format(k.actual_units);$('#kpi-oee').textContent=ru.format(k.oee_percent)+'%';$('#kpi-downtime').textContent=ru.format(k.downtime_minutes)+' мин';$('#kpi-quality').textContent=ru.format(100-k.defect_rate_percent)+'%';document.querySelectorAll('[data-page]').forEach(a=>{a.classList.toggle('active',a.dataset.page===currentPage);if(a.dataset.page===currentPage)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
-const pages={home:()=>factoryPanel()+shopPanel()+(selectedArea?'<div class="cols">'+chartPanel()+tipsPanel()+'</div>':tipsPanel()),production:()=>factoryPanel()+'<div class="cols">'+chartPanel()+planFactPanel()+'</div><div class="cols production-bottom">'+eventsPanel()+bottleneckPanel()+'</div>',equipment:equipmentPanel,incidents:incidentsPanel,analytics:()=>chartPanel()+planPanel(),ai:()=>tipsPanel()+eventsPanel()};$('#content').innerHTML=pages[currentPage]();document.querySelectorAll('[data-area]').forEach(b=>b.addEventListener('click',()=>{selectedArea=b.dataset.area;render();}));renderTips();if($('#output-chart')){renderChart();$('#chart-period').addEventListener('change',event=>{chartPeriod=event.target.value;renderChart();});}if($('#event-list'))renderEvents();if($('#plan-list')){renderPlan();$('#apply-plan-button').addEventListener('click',applyPlan);}}
+function render(){updateIdentity();const k=state.dashboard.kpis;$('#kpi-output').textContent=ru.format(k.actual_units);$('#kpi-oee').textContent=ru.format(k.oee_percent)+'%';$('#kpi-downtime').textContent=ru.format(k.downtime_minutes)+' мин';$('#kpi-quality').textContent=ru.format(100-k.defect_rate_percent)+'%';document.querySelectorAll('[data-page]').forEach(a=>{a.classList.toggle('active',a.dataset.page===currentPage);if(a.dataset.page===currentPage)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
+const pages={cabinet:cabinetPanel,profile:profilePanel,home:()=>factoryPanel()+shopPanel()+(selectedArea?'<div class="cols">'+chartPanel()+tipsPanel()+'</div>':tipsPanel()),production:()=>factoryPanel()+'<div class="cols">'+chartPanel()+planFactPanel()+'</div><div class="cols production-bottom">'+eventsPanel()+bottleneckPanel()+'</div>',equipment:equipmentPanel,incidents:incidentsPanel,analytics:()=>chartPanel()+planPanel(),ai:()=>tipsPanel()+eventsPanel()};$('#content').innerHTML=pages[currentPage]();document.querySelectorAll('[data-area]').forEach(b=>b.addEventListener('click',()=>{selectedArea=b.dataset.area;render();}));renderTips();if($('#output-chart')){renderChart();$('#chart-period').addEventListener('change',event=>{chartPeriod=event.target.value;renderChart();});}if($('#event-list'))renderEvents();if($('#plan-list')){renderPlan();$('#apply-plan-button').addEventListener('click',applyPlan);}bindAccountForms();}
 async function applyPlan(){await busy($('#apply-plan-button'),async()=>{for(const item of state.plan.allocations){await api(`/api/plans/${item.id}`,{method:'PUT',body:JSON.stringify({model:item.model,monthly_plan:item.suggested})});}await api('/api/event-note',{method:'POST',body:JSON.stringify({title:'Месячный план скорректирован',details:{new_total:state.plan.target}})});await refresh();toast('План обновлён');});}
 function renderPlan() {
   const plan = state.plan;
@@ -66,7 +70,8 @@ function renderPlan() {
   $('#plan-progress-fill').style.width = `${Math.min(100, plan.current_total / plan.target * 100)}%`;
   $('#plan-list').innerHTML = plan.allocations.map((item) => `<div class="plan-row"><span>${esc(item.model)}</span><div><div class="plan-bar"><i style="width:${plan.current_total ? item.current / plan.current_total * 100 : 0}%"></i></div>${item.additional ? `<div class="plan-add">+${ru.format(item.additional)} \u043f\u043e \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044e</div>` : ''}</div><strong>${ru.format(item.current)}</strong></div>`).join('');
   const button = $('#apply-plan-button');
-  button.disabled = !plan.gap;
+  button.disabled = !plan.gap || currentUser.role !== 'admin';
+  button.hidden = currentUser.role !== 'admin';
   button.textContent = plan.gap ? `\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u0435 +${ru.format(plan.gap)}` : '\u0426\u0435\u043b\u044c \u0434\u043e\u0441\u0442\u0438\u0433\u043d\u0443\u0442\u0430';
 }
 
@@ -135,5 +140,97 @@ $('#reset-button').addEventListener('click', async () => busy($('#reset-button')
 $('#refresh-button').addEventListener('click', refresh);
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => {if (state.lines && $('#output-chart')) renderChart();}, 100); });
-window.addEventListener('hashchange', () => { currentPage = ['home','production','equipment','incidents','analytics','ai'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'home'; if(state.dashboard) render(); });
-refresh();
+window.addEventListener('hashchange', () => { currentPage = ['home','production','equipment','incidents','analytics','ai','cabinet','profile'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'home'; if(state.dashboard) render(); });
+boot();
+
+
+function roleLabel(role) { return role === 'admin' ? 'Администратор' : 'Пользователь'; }
+function updateIdentity() {
+  $('#header-name').textContent = currentUser.name;
+  $('#dropdown-name').textContent = currentUser.name;
+  $('#dropdown-role').textContent = roleLabel(currentUser.role);
+  $('#avatar-initials').textContent = currentUser.name.trim().split(/\s+/).slice(0,2).map(word => [...word][0]).join('').toUpperCase();
+  $('#shift-button').hidden = currentUser.role !== 'admin';
+  $('#reset-button').hidden = currentUser.role !== 'admin';
+}
+function accountSummary() {
+  const k=state.dashboard.kpis;
+  return `<div class="account-stats"><article><span>Выпуск за период</span><strong>${ru.format(k.actual_units)} <small>авто</small></strong></article><article><span>OEE</span><strong>${ru.format(k.oee_percent)}<small>%</small></strong></article><article><span>Качество</span><strong>${ru.format(100-k.defect_rate_percent)}<small>%</small></strong></article></div>`;
+}
+function cabinetPanel() {
+  const isAdmin=currentUser.role==='admin';
+  const greeting=panel(`<i class="fa-solid fa-table-columns" aria-hidden="true"></i> ${isAdmin?'Кабинет администратора':'Кабинет пользователя'}`,`<div class="cabinet-welcome"><span class="role-badge">${roleLabel(currentUser.role)}</span><h1>Здравствуйте, ${esc(currentUser.name)}!</h1><p class="muted">${isAdmin?'Управляйте доступом команды и контролируйте производство.':'Следите за показателями завода и управляйте своим профилем.'}</p></div>${accountSummary()}<div class="account-links"><a href="#home"><i class="fa-solid fa-map" aria-hidden="true"></i> Карта завода</a><a href="#production"><i class="fa-solid fa-car" aria-hidden="true"></i> Производство</a><a href="#profile"><i class="fa-solid fa-user" aria-hidden="true"></i> Мой профиль</a></div>`);
+  if(!isAdmin) return greeting+panel('<i class="fa-solid fa-user" aria-hidden="true"></i> Ваш аккаунт',`<dl class="account-details"><div><dt>Логин</dt><dd>${esc(currentUser.username)}</dd></div><div><dt>Доступ</dt><dd>Просмотр показателей и аналитики</dd></div><div><dt>Статус</dt><dd><span class="pill good">Активен</span></dd></div></dl><p class="muted">Для изменения производственных данных обратитесь к администратору.</p>`);
+  return greeting+panel('<i class="fa-solid fa-users" aria-hidden="true"></i> Управление пользователями',`<div tabindex="0" aria-label="Таблица, прокрутка по горизонтали" class="table-wrap users-table"><table><thead><tr><th>Пользователь</th><th>Логин</th><th>Роль</th><th>Статус</th><th>Действие</th></tr></thead><tbody>${accountUsers.map(user=>`<tr><td>${esc(user.name)}</td><td>${esc(user.username)}</td><td>${roleLabel(user.role)}</td><td><span class="pill ${user.is_active?'good':'bad'}">${user.is_active?'Активен':'Заблокирован'}</span></td><td>${user.id===currentUser.id?'<span class="muted">Ваш аккаунт</span>':`<button data-toggle-user="${user.id}" data-active="${user.is_active?'0':'1'}">${user.is_active?'Заблокировать':'Активировать'}</button>`}</td></tr>`).join('')}</tbody></table></div>`)+panel('<i class="fa-solid fa-user-plus" aria-hidden="true"></i> Создать аккаунт',`<form id="create-user-form" class="account-form form-grid"><label>Имя<input name="name" required maxlength="100" autocomplete="off" placeholder="Имя пользователя"></label><label>Логин<input name="username" required minlength="3" maxlength="80" pattern="[A-Za-z0-9_.@-]{3,80}" autocomplete="off" placeholder="Латинские буквы и цифры"></label><label>Роль<select name="role"><option value="user">Пользователь</option><option value="admin">Администратор</option></select></label><label>Временный пароль<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="Минимум 12 символов"></label><p class="form-error form-full" role="alert" hidden></p><div class="form-full"><button class="submit-button" type="submit">Создать аккаунт</button></div></form>`);
+}
+function profilePanel() {
+  return panel('<i class="fa-solid fa-user" aria-hidden="true"></i> Профиль',`<div class="profile-card"><span class="profile-large-avatar"><i class="fa-solid fa-user" aria-hidden="true"></i></span><div><h1>${esc(currentUser.name)}</h1><span class="role-badge">${roleLabel(currentUser.role)}</span></div></div><dl class="account-details"><div><dt>Логин</dt><dd>${esc(currentUser.username)}</dd></div><div><dt>Аккаунт создан</dt><dd>${new Intl.DateTimeFormat('ru-RU',{dateStyle:'medium'}).format(new Date(currentUser.created_at*1000))}</dd></div></dl><form id="profile-form" class="account-form"><label>Имя<input name="name" value="${esc(currentUser.name)}" required maxlength="100" autocomplete="name"></label><p class="form-error" role="alert" hidden></p><button type="submit" class="submit-button">Сохранить изменения</button></form>`)+panel('<i class="fa-solid fa-lock" aria-hidden="true"></i> Сменить пароль',`<form id="password-form" class="account-form"><label>Текущий пароль<input name="current_password" type="password" required maxlength="128" autocomplete="current-password"></label><div class="form-grid"><label>Новый пароль<input name="new_password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="Минимум 12 символов"></label><label>Повторите новый пароль<input name="confirm_password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label></div><p class="form-error" role="alert" hidden></p><button type="submit" class="submit-button">Обновить пароль</button><p class="muted">После смены пароля другие сессии этого аккаунта завершатся.</p></form>`);
+}
+function bindForm(id, action) {
+  const form=$(id);if(!form)return;
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();const button=form.querySelector('[type="submit"]'),error=form.querySelector('.form-error');error.hidden=true;button.disabled=true;
+    try{await action(Object.fromEntries(new FormData(form)),form);}catch(e){error.textContent=e.message;error.hidden=false;}finally{button.disabled=false;}
+  });
+}
+function bindAccountForms() {
+  bindForm('#profile-form',async values=>{currentUser=await api('/api/auth/profile',{method:'PATCH',body:JSON.stringify({name:values.name})});render();toast('Профиль обновлён');});
+  bindForm('#password-form',async(values,form)=>{if(values.new_password!==values.confirm_password)throw new Error('Новые пароли не совпадают');await api('/api/auth/password',{method:'POST',body:JSON.stringify({current_password:values.current_password,new_password:values.new_password})});form.reset();toast('Пароль изменён');});
+  bindForm('#create-user-form',async values=>{await api('/api/admin/users',{method:'POST',body:JSON.stringify(values)});accountUsers=await api('/api/admin/users');render();toast('Аккаунт создан');});
+  document.querySelectorAll('[data-toggle-user]').forEach(button=>button.addEventListener('click',()=>busy(button,async()=>{await api(`/api/admin/users/${button.dataset.toggleUser}`,{method:'PATCH',body:JSON.stringify({is_active:button.dataset.active==='1'})});accountUsers=await api('/api/admin/users');render();toast('Статус аккаунта обновлён');})));
+}
+function closeProfileMenu(){ $('#profile-dropdown').hidden=true;$('#profile-trigger').setAttribute('aria-expanded','false'); }
+$('#profile-trigger').addEventListener('click',()=>{const open=$('#profile-dropdown').hidden;$('#profile-dropdown').hidden=!open;$('#profile-trigger').setAttribute('aria-expanded',String(open));});
+document.addEventListener('click',event=>{if(!event.target.closest('.profile-menu'))closeProfileMenu();});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('#profile-dropdown').hidden){closeProfileMenu();$('#profile-trigger').focus();}});
+$('#profile-dropdown').querySelectorAll('a').forEach(link=>link.addEventListener('click',closeProfileMenu));
+$('#logout-button').addEventListener('click',()=>busy($('#logout-button'),async()=>{await api('/api/auth/logout',{method:'POST'});location.replace('/login');}));
+async function boot(){try{const session=await api('/api/auth/me');currentUser=session.user;csrfToken=session.csrf_token;updateIdentity();if(currentUser.role==='admin')accountUsers=await api('/api/admin/users');await refresh();}catch(error){toast(error.message);}}
+
+
+// Mobile drawer navigation: dismiss, focus containment and scroll locking.
+const mobileNavigation = window.matchMedia('(max-width: 1023px)');
+let drawerOpen = false;
+function setDrawer(open, focusContent = false) {
+  drawerOpen = Boolean(open && mobileNavigation.matches);
+  const sidebar = $('#app-navigation');
+  document.body.classList.toggle('drawer-open', drawerOpen);
+  $('#menu-toggle').setAttribute('aria-expanded', String(drawerOpen));
+  $('#menu-toggle').setAttribute('aria-label', drawerOpen ? 'Закрыть меню' : 'Открыть меню');
+  $('#menu-backdrop').hidden = !drawerOpen;
+  sidebar.inert = mobileNavigation.matches && !drawerOpen;
+  if (mobileNavigation.matches) {
+    sidebar.setAttribute('aria-hidden', String(!drawerOpen));
+    sidebar.setAttribute('role', 'dialog');
+    if (drawerOpen) sidebar.setAttribute('aria-modal', 'true');
+    else sidebar.removeAttribute('aria-modal');
+  } else {
+    sidebar.removeAttribute('aria-hidden');
+    sidebar.removeAttribute('role');
+    sidebar.removeAttribute('aria-modal');
+  }
+  [$('#content'), $('.kpi-sidebar'), $('.header .brand'), $('.profile-menu'), $('#menu-toggle')].forEach(el => { el.inert = drawerOpen; });
+  if (drawerOpen) {closeProfileMenu();$('#menu-close').focus();}
+  else if (focusContent) $('#content').focus({preventScroll:true});
+  else if (mobileNavigation.matches) $('#menu-toggle').focus({preventScroll:true});
+}
+$('#menu-toggle').addEventListener('click', () => setDrawer(!drawerOpen));
+$('#menu-close').addEventListener('click', () => setDrawer(false));
+$('#menu-backdrop').addEventListener('click', () => setDrawer(false));
+$('#app-navigation').querySelectorAll('nav a').forEach(link => link.addEventListener('click', () => {
+  if (drawerOpen) setDrawer(false, true);
+}));
+$('#shift-button').addEventListener('click', () => {if (drawerOpen) setDrawer(false);});
+document.addEventListener('keydown', event => {
+  if (!drawerOpen) return;
+  if (event.key === 'Escape') {event.preventDefault();setDrawer(false);return;}
+  if (event.key !== 'Tab') return;
+  const items = [...$('#app-navigation').querySelectorAll('a[href],button:not([disabled])')].filter(el => !el.hidden && el.getClientRects().length);
+  const first = items[0], last = items[items.length-1];
+  if (event.shiftKey && document.activeElement === first) {event.preventDefault();last.focus();}
+  else if (!event.shiftKey && document.activeElement === last) {event.preventDefault();first.focus();}
+});
+mobileNavigation.addEventListener('change', () => setDrawer(false));
+// Set the initial visibility without moving focus when the page loads.
+$('#app-navigation').inert = mobileNavigation.matches;
+if (mobileNavigation.matches) {$('#app-navigation').setAttribute('aria-hidden','true');$('#app-navigation').setAttribute('role','dialog');}
