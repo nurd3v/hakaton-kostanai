@@ -258,7 +258,27 @@ def install_auth(app, connect) -> None:
             row = db.execute('SELECT * FROM auth_users WHERE id=?', (user_id,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Пользователь не найден')
+            if row['role'] == 'admin' and row['is_active'] and not payload.is_active:
+                remaining = db.execute("SELECT COUNT(*) FROM auth_users WHERE role='admin' AND is_active=1 AND id<>?", (user_id,)).fetchone()[0]
+                if remaining == 0:
+                    raise HTTPException(409, 'Нельзя заблокировать последнего активного администратора')
             db.execute('UPDATE auth_users SET is_active=? WHERE id=?', (int(payload.is_active), user_id))
             if not payload.is_active:
                 db.execute('DELETE FROM auth_sessions WHERE user_id=?', (user_id,))
             return public_user(db.execute('SELECT * FROM auth_users WHERE id=?', (user_id,)).fetchone())
+
+    @app.delete('/api/admin/users/{user_id}', status_code=204)
+    def delete_user(user_id: int, request: Request):
+        admin(request)
+        if user_id == request.state.user['id']:
+            raise HTTPException(400, 'Нельзя удалить собственный аккаунт')
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT role,is_active FROM auth_users WHERE id=?', (user_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, 'Пользователь не найден')
+            if row['role'] == 'admin' and row['is_active']:
+                remaining = db.execute("SELECT COUNT(*) FROM auth_users WHERE role='admin' AND is_active=1 AND id<>?", (user_id,)).fetchone()[0]
+                if remaining == 0:
+                    raise HTTPException(409, 'Нельзя удалить последнего активного администратора')
+            db.execute('DELETE FROM auth_users WHERE id=?', (user_id,))

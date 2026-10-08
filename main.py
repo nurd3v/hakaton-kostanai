@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import os
 import json
+import csv
+import io
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from auth import install_auth, setup_auth
 
 
@@ -71,6 +73,15 @@ def setup_database() -> None:
                 title TEXT NOT NULL,
                 details TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS equipment_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                area TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'working' CHECK(status IN ('working','maintenance','stopped')),
+                last_maintenance TEXT,
+                next_maintenance TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT ''
+            );
         """)
         if db.execute("SELECT COUNT(*) FROM line_runs").fetchone()[0] == 0:
             db.executemany("""INSERT INTO line_runs
@@ -99,6 +110,13 @@ def setup_database() -> None:
                 ("2026-10-01", "Сборка", 121, 1), ("2026-10-02", "Сварка", 111, 3),
                 ("2026-10-02", "Окраска", 116, 6), ("2026-10-02", "Сборка", 119, 2),
             ])
+        db.executemany("""INSERT OR IGNORE INTO equipment_assets
+            (name,area,status,last_maintenance,next_maintenance,notes) VALUES (?,?,?,?,?,?)""", [
+            ("ABB-01", "Сварка", "working", "2026-09-15", "2026-10-15", "Робот сварки"),
+            ("ABB-04", "Сварка", "working", "2026-09-18", "2026-10-18", "Робот сварки"),
+            ("Камера-02", "Окраска", "working", "2026-09-20", "2026-10-20", "Камера окраски"),
+            ("Конвейер-03", "Сборка", "working", "2026-09-10", "2026-10-10", "Главный конвейер"),
+        ])
 
 
 @asynccontextmanager
@@ -152,6 +170,49 @@ class QualityIn(InputModel):
     defects: int = Field(ge=0)
 
 
+class ShiftEntryIn(InputModel):
+    work_date: date
+    area: str = Field(min_length=1, max_length=100)
+    planned_units: int = Field(ge=0)
+    actual_units: int = Field(ge=0)
+    operating_hours: float = Field(ge=0, le=24)
+    utilization_percent: float = Field(ge=0, le=100)
+    produced: int = Field(ge=0)
+    defects: int = Field(ge=0)
+    equipment: str = Field(default="", max_length=100)
+    downtime_reason: str = Field(default="", max_length=500)
+    downtime_minutes: int = Field(default=0, ge=0)
+    is_critical: bool = True
+
+    @model_validator(mode="after")
+    def validate_shift(self):
+        if self.area not in AREAS:
+            raise ValueError("Неизвестный производственный участок")
+        if self.defects > self.produced:
+            raise ValueError("Брак не может превышать выпуск")
+        has_downtime = bool(self.equipment or self.downtime_reason or self.downtime_minutes)
+        if has_downtime and not (self.equipment.strip() and self.downtime_reason.strip() and self.downtime_minutes > 0):
+            raise ValueError("Для простоя укажите оборудование, причину и длительность")
+        return self
+
+
+class AssetIn(InputModel):
+    name: str = Field(min_length=1, max_length=100)
+    area: str = Field(min_length=1, max_length=100)
+    status: str = Field(default="working", pattern="^(working|maintenance|stopped)$")
+    last_maintenance: date | None = None
+    next_maintenance: date
+    notes: str = Field(default="", max_length=500)
+
+    @model_validator(mode="after")
+    def validate_asset(self):
+        if self.area not in AREAS:
+            raise ValueError("Неизвестный производственный участок")
+        if self.last_maintenance and self.last_maintenance > self.next_maintenance:
+            raise ValueError("Дата следующего ТО должна быть не раньше последнего ТО")
+        return self
+
+
 def rows(query: str, params: tuple = ()) -> list[dict]:
     with connect() as db:
         return [dict(row) for row in db.execute(query, params).fetchall()]
@@ -186,15 +247,30 @@ def validate_range(start: date | None, end: date | None) -> None:
         raise HTTPException(422, "start_date must be before or equal to end_date")
 
 
+def scoped_filters(start: date | None, end: date | None, area: str | None, column: str) -> tuple[str, tuple]:
+    where, params = date_filters(start, end)
+    if area:
+        if area not in AREAS:
+            raise HTTPException(422, "Unknown production area")
+        where += (" AND " if where else " WHERE ") + f"{column} = ?"
+        params += (area,)
+    return where, params
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "allur-factory-digital-twin"}
 
 
 @app.get("/api/lines")
-def get_lines(start_date: date | None = None, end_date: date | None = None):
+def get_lines(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
     validate_range(start_date, end_date)
     where, params = date_filters(start_date, end_date)
+    if area:
+        if area not in AREAS:
+            raise HTTPException(422, "Unknown production area")
+        where += (" AND " if where else " WHERE ") + "line = ?"
+        params += (AREAS[area],)
     return rows(f"SELECT * FROM line_runs{where} ORDER BY work_date,line", params)
 
 
@@ -204,9 +280,9 @@ def add_line(record: LineRunIn):
 
 
 @app.get("/api/downtimes")
-def get_downtimes(start_date: date | None = None, end_date: date | None = None):
+def get_downtimes(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
     validate_range(start_date, end_date)
-    where, params = date_filters(start_date, end_date)
+    where, params = scoped_filters(start_date, end_date, area, "area")
     return rows(f"SELECT * FROM downtimes{where} ORDER BY work_date,equipment", params)
 
 
@@ -246,9 +322,9 @@ def delete_plan(plan_id: int):
 
 
 @app.get("/api/quality")
-def get_quality(start_date: date | None = None, end_date: date | None = None):
+def get_quality(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
     validate_range(start_date, end_date)
-    where, params = date_filters(start_date, end_date)
+    where, params = scoped_filters(start_date, end_date, area, "area")
     return rows(f"""SELECT id,work_date,area,produced,defects,
         CASE WHEN produced=0 THEN 0 ELSE ROUND(defects*100.0/produced,2) END AS defect_rate_percent
         FROM quality_records{where} ORDER BY work_date,area""", params)
@@ -263,6 +339,22 @@ def add_quality(record: QualityIn):
     return result
 
 
+@app.post("/api/shift-entry", status_code=201)
+def add_shift_entry(record: ShiftEntryIn):
+    line_name = AREAS[record.area]
+    with connect() as db:
+        db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent) VALUES (?,?,?,?,?,?)",
+                   (record.work_date.isoformat(), line_name, record.planned_units, record.actual_units, record.operating_hours, record.utilization_percent))
+        db.execute("INSERT INTO quality_records (work_date,area,produced,defects) VALUES (?,?,?,?)",
+                   (record.work_date.isoformat(), record.area, record.produced, record.defects))
+        if record.downtime_minutes:
+            db.execute("INSERT INTO downtimes (work_date,area,equipment,reason,duration_minutes,is_critical) VALUES (?,?,?,?,?,?)",
+                       (record.work_date.isoformat(), record.area, record.equipment, record.downtime_reason, record.downtime_minutes, int(record.is_critical)))
+    log_event("shift_entry", "warning" if record.downtime_minutes else "info", f"Смена внесена: {record.area}",
+              {"date": record.work_date.isoformat(), "actual_units": record.actual_units, "defects": record.defects})
+    return {"status": "created", "area": record.area, "work_date": record.work_date.isoformat()}
+
+
 @app.get("/api/production-flow")
 def production_flow():
     return [
@@ -272,17 +364,23 @@ def production_flow():
 
 
 @app.get("/api/dashboard")
-def dashboard(start_date: date | None = None, end_date: date | None = None):
+def dashboard(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
     validate_range(start_date, end_date)
+    if area and area not in AREAS:
+        raise HTTPException(422, "Unknown production area")
     where, params = date_filters(start_date, end_date)
+    if area:
+        where += (" AND " if where else " WHERE ") + "line = ?"
+        params += (AREAS[area],)
     line_data = rows(f"SELECT * FROM line_runs{where}", params)
-    quality = rows(f"SELECT * FROM quality_records{where}", params)
-    downtime_where, downtime_params = date_filters(start_date, end_date)
+    quality_where, quality_params = scoped_filters(start_date, end_date, area, "area")
+    quality = rows(f"SELECT * FROM quality_records{quality_where}", quality_params)
+    downtime_where, downtime_params = scoped_filters(start_date, end_date, area, "area")
     downtimes = rows(f"SELECT * FROM downtimes{downtime_where}", downtime_params)
     with connect() as db:
         monthly_plan = db.execute("SELECT COALESCE(SUM(monthly_plan),0) FROM production_plans").fetchone()[0]
     # Count finished vehicles once, at final assembly, rather than summing the same units at each stage.
-    finished_line_data = [r for r in line_data if r["line"].startswith("\u0421\u0431\u043e\u0440\u043a\u0430")]
+    finished_line_data = line_data if area else [r for r in line_data if r["line"].startswith("\u0421\u0431\u043e\u0440\u043a\u0430")]
     planned = sum(r["planned_units"] for r in finished_line_data)
     actual = sum(r["actual_units"] for r in finished_line_data)
     utilization = sum(r["utilization_percent"] for r in line_data) / len(line_data) if line_data else 0
@@ -322,8 +420,35 @@ def dashboard(start_date: date | None = None, end_date: date | None = None):
 
 
 @app.get("/api/alerts")
-def get_alerts(start_date: date | None = None, end_date: date | None = None):
-    return dashboard(start_date, end_date)["alerts"]
+def get_alerts(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
+    return dashboard(start_date, end_date, area)["alerts"]
+
+
+@app.get("/api/reports.csv")
+def export_report(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
+    validate_range(start_date, end_date)
+    if area and area not in AREAS:
+        raise HTTPException(422, "Unknown production area")
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    def write_row(*values):
+        safe = [("'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value) for value in values]
+        writer.writerow(safe)
+    write_row("Раздел", "Дата", "Участок", "Объект", "Значение", "Единица")
+    line_where, line_params = date_filters(start_date, end_date)
+    if area:
+        line_where += (" AND " if line_where else " WHERE ") + "line = ?"
+        line_params += (AREAS[area],)
+    for item in rows(f"SELECT * FROM line_runs{line_where} ORDER BY work_date,line", line_params):
+        write_row("Производство", item["work_date"], item["line"], "Выпуск", item["actual_units"], "авто")
+        write_row("Производство", item["work_date"], item["line"], "Загрузка", item["utilization_percent"], "%")
+    for table, section, value_field, unit in (("quality_records", "Качество", "defects", "шт брака"), ("downtimes", "Простои", "duration_minutes", "мин")):
+        where, params = scoped_filters(start_date, end_date, area, "area")
+        for item in rows(f"SELECT * FROM {table}{where} ORDER BY work_date,area", params):
+            label = "Брак" if table == "quality_records" else item["equipment"]
+            write_row(section, item["work_date"], item["area"], label, item[value_field], unit)
+    content = "\ufeff" + output.getvalue()
+    return Response(content, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=ro-factory-report.csv"})
 
 
 AREAS = {
@@ -360,8 +485,17 @@ def dashboard_page():
 
 
 @app.get("/api/factory-state")
-def factory_state():
-    latest = rows("SELECT MAX(work_date) AS work_date FROM line_runs")[0]["work_date"]
+def factory_state(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
+    validate_range(start_date, end_date)
+    if area and area not in AREAS:
+        raise HTTPException(422, "Unknown production area")
+    latest_where, latest_params = date_filters(start_date, end_date)
+    if area:
+        latest_where += (" AND " if latest_where else " WHERE ") + "line = ?"
+        latest_params += (AREAS[area],)
+    latest = rows(f"SELECT MAX(work_date) AS work_date FROM line_runs{latest_where}", latest_params)[0]["work_date"]
+    if latest is None:
+        return {"date": None, "areas": []}
     lines = rows("SELECT * FROM line_runs WHERE work_date=? ORDER BY id DESC", (latest,))
     quality = rows("SELECT * FROM quality_records WHERE work_date=? ORDER BY id DESC", (latest,))
     downtimes = rows("SELECT * FROM downtimes WHERE work_date=?", (latest,))
@@ -387,13 +521,41 @@ def factory_state():
             "downtime_minutes": down_minutes,
             "equipment": [x["equipment"] for x in area_downs],
         })
-    return {"date": latest, "areas": result}
+    return {"date": latest, "areas": [item for item in result if not area or item["area"] == area]}
+
+
+@app.get("/api/equipment")
+def get_equipment(area: str | None = None):
+    where, params = scoped_filters(None, None, area, "a.area")
+    return rows(f"""SELECT a.*,
+        COALESCE((SELECT SUM(d.duration_minutes) FROM downtimes d WHERE d.equipment=a.name),0) AS total_downtime_minutes,
+        (SELECT MAX(d.work_date) FROM downtimes d WHERE d.equipment=a.name) AS last_incident
+        FROM equipment_assets a{where} ORDER BY a.next_maintenance,a.name""", params)
+
+
+@app.post("/api/equipment", status_code=201)
+def add_equipment(record: AssetIn):
+    return insert("equipment_assets", record.model_dump(), ("name", "area", "status", "last_maintenance", "next_maintenance", "notes"))
+
+
+@app.put("/api/equipment/{asset_id}")
+def update_equipment(asset_id: int, record: AssetIn):
+    data = record.model_dump()
+    values = tuple(value.isoformat() if isinstance(value, date) else value for value in data.values())
+    try:
+        with connect() as db:
+            cursor = db.execute("UPDATE equipment_assets SET name=?,area=?,status=?,last_maintenance=?,next_maintenance=?,notes=? WHERE id=?", (*values, asset_id))
+            if not cursor.rowcount:
+                raise HTTPException(404, "Оборудование не найдено")
+            return dict(db.execute("SELECT * FROM equipment_assets WHERE id=?", (asset_id,)).fetchone())
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "Оборудование с таким названием уже существует") from exc
 
 
 @app.get("/api/recommendations")
-def recommendations(start_date: date | None = None, end_date: date | None = None):
+def recommendations(start_date: date | None = None, end_date: date | None = None, area: str | None = None):
     validate_range(start_date, end_date)
-    where, params = date_filters(start_date, end_date)
+    where, params = scoped_filters(start_date, end_date, area, "area")
     quality = rows(f"SELECT area,SUM(produced) produced,SUM(defects) defects FROM quality_records{where} GROUP BY area", params)
     downtime = rows(f"SELECT area,SUM(duration_minutes) minutes FROM downtimes{where} GROUP BY area", params)
     suggestions = []
@@ -451,6 +613,7 @@ def simulate_shift(request: SimulationIn):
     with connect() as db:
         last = db.execute("SELECT MAX(work_date) FROM line_runs").fetchone()[0]
     work_day = max(date.today(), date.fromisoformat(last) + timedelta(days=1)) if last else date.today()
+    previous = dashboard(date.fromisoformat(last), date.fromisoformat(last)) if last else dashboard()
     scenario = request.scenario
     values = {"\u0421\u0432\u0430\u0440\u043a\u0430": (118, 96.0), "\u041e\u043a\u0440\u0430\u0441\u043a\u0430": (116, 95.0), "\u0421\u0431\u043e\u0440\u043a\u0430": (120, 98.0)}
     if scenario == "failure":
@@ -462,6 +625,7 @@ def simulate_shift(request: SimulationIn):
             db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent) VALUES (?,?,?,?,?,?)", (work_day.isoformat(), line_name, 120, actual, round(8 * utilization / 100, 1), utilization))
             db.execute("INSERT INTO quality_records (work_date,area,produced,defects) VALUES (?,?,?,?)", (work_day.isoformat(), area, actual, defects))
     if scenario == "failure":
+        values["Сборка"] = (78, 67.0)
         with connect() as db:
             db.execute("INSERT INTO downtimes (work_date,area,equipment,reason,duration_minutes,is_critical) VALUES (?,?,?,?,?,1)", (work_day.isoformat(), "\u041e\u043a\u0440\u0430\u0441\u043a\u0430", "\u041a\u0430\u043c\u0435\u0440\u0430-02", "\u041f\u0435\u0440\u0435\u0433\u0440\u0435\u0432 \u0432\u0435\u043d\u0442\u0438\u043b\u044f\u0442\u043e\u0440\u0430", 68))
         log_event("simulation", "critical", "\u0421\u0431\u043e\u0439 \u043a\u0430\u043c\u0435\u0440\u044b \u043e\u043a\u0440\u0430\u0441\u043a\u0438 \u0441\u043c\u043e\u0434\u0435\u043b\u0438\u0440\u043e\u0432\u0430\u043d", {"date": work_day.isoformat(), "equipment": "\u041a\u0430\u043c\u0435\u0440\u0430-02", "duration_minutes": 68})
@@ -469,7 +633,23 @@ def simulate_shift(request: SimulationIn):
         log_event("simulation", "warning", "\u0420\u043e\u0441\u0442 \u0431\u0440\u0430\u043a\u0430 \u043d\u0430 \u043e\u043a\u0440\u0430\u0441\u043a\u0435 \u0441\u043c\u043e\u0434\u0435\u043b\u0438\u0440\u043e\u0432\u0430\u043d", {"date": work_day.isoformat(), "defects": 8})
     else:
         log_event("simulation", "info", "\u0421\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044f \u0441\u043c\u0435\u043d\u044b \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430", {"date": work_day.isoformat(), "scenario": scenario})
-    return {"date": work_day.isoformat(), "scenario": scenario, "dashboard": dashboard(work_day, work_day)}
+    current = dashboard(work_day, work_day)
+    comparison_keys = ("actual_units", "oee_percent", "defect_rate_percent", "downtime_minutes")
+    comparison = {key: {"before": previous["kpis"][key], "after": current["kpis"][key],
+                        "change": round(current["kpis"][key] - previous["kpis"][key], 2)}
+                  for key in comparison_keys}
+    recommendations = {
+        "failure": {"action": "Проверить вентилятор камеры окраски и выполнить внеплановое ТО.",
+                    "expected_effect": "После устранения узкого места выпуск может вернуться к штатному уровню около 120 автомобилей за смену."},
+        "quality": {"action": "Проверить настройки камеры окраски и усилить контроль первой детали после переналадки.",
+                    "expected_effect": "Целевой уровень брака — не более 2%; достижение цели нужно подтвердить следующей сменой."},
+        "normal": {"action": "Продолжать мониторинг загрузки и качества участков.",
+                   "expected_effect": "Сохранить выпуск около 120 автомобилей за смену при текущих настройках."},
+    }
+    log_event("simulation_comparison", "info", "Сравнение смен до и после симуляции",
+              {"date": work_day.isoformat(), "scenario": scenario, "comparison": comparison, "recommendation": recommendations[scenario]})
+    return {"date": work_day.isoformat(), "scenario": scenario, "dashboard": current,
+            "comparison": comparison, "recommendation": recommendations[scenario]}
 
 
 @app.post("/api/simulation/reset")

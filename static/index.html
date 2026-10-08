@@ -70,6 +70,14 @@
       tabindex="-1"
       hidden
     ></button>
+    <section class="filter-toolbar" aria-label="Фильтры отчёта">
+      <label>С даты<input id="filter-start" type="date" /></label>
+      <label>По дату<input id="filter-end" type="date" /></label>
+      <label>Участок<select id="filter-area"><option value="">Все участки</option><option>Сварка</option><option>Окраска</option><option>Сборка</option></select></label>
+      <button id="apply-filters">Показать</button>
+      <button id="clear-filters" class="secondary-button">Сбросить</button>
+      <a id="export-report" class="button-link" href="/api/reports.csv">Скачать CSV</a>
+    </section>
     <div class="layout">
       <aside class="sidebar" id="app-navigation" aria-label="Навигация">
         <div class="drawer-heading">
@@ -100,6 +108,9 @@
           ><a href="#ai" data-page="ai"
             ><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>
             <span>ИИ Анализ</span></a
+          ><a href="#shift-entry" data-page="shift-entry" id="shift-entry-link" hidden
+            ><i class="fa-solid fa-pen-to-square" aria-hidden="true"></i>
+            <span>Внести смену</span></a
           >
         </nav>
         <div class="sidebar-bottom">
@@ -161,6 +172,7 @@
           брака
         </button>
       </div>
+      <section id="simulation-comparison" class="comparison-result" hidden></section>
     </dialog>
     <div class="toast" id="toast" role="status"></div>
     <script src="/static/app.js"></script>
