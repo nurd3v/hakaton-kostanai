@@ -45,7 +45,7 @@ function dateLabel(raw, options = { day: 'numeric', month: 'short', year: 'numer
 async function refresh() {
   try {
     const filtered = (path) => api(withFilters(path));
-    const [dashboard, factory, lines, quality, downtime, plans, plan, tips, events] = await Promise.all([
+    const [dashboard, factory, lines, quality, downtime, plans, plan, tips, events, equipment] = await Promise.all([
       filtered('/api/dashboard'), filtered('/api/factory-state'), filtered('/api/lines'), filtered('/api/quality'),
       filtered('/api/downtimes'), api('/api/plans'), api('/api/plan-recommendation'),
       filtered('/api/recommendations'), api('/api/events?limit=8'), filtered('/api/equipment'),
