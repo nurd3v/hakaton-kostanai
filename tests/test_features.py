@@ -1,4 +1,7 @@
 from datetime import date, timedelta
+import gc
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,20 +11,25 @@ from auth import NewUserIn, create_user, setup_auth
 
 
 @pytest.fixture
-def admin_client(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DB_PATH", tmp_path / "test.db")
+def admin_client(monkeypatch):
+    temporary_dir = TemporaryDirectory(prefix=".pytest-db-", dir=Path(__file__).resolve().parents[1])
+    monkeypatch.setattr(main, "DB_PATH", Path(temporary_dir.name) / "test.db")
     main.setup_database()
     setup_auth(main.connect)
     create_user(main.connect, NewUserIn(
         username="tester", name="Test Admin", password="test-password-123", role="admin"
     ))
-    with TestClient(main.app) as client:
-        response = client.post("/api/auth/login", json={
-            "username": "tester", "password": "test-password-123"
-        })
-        assert response.status_code == 200
-        client.headers.update({"X-CSRF-Token": response.json()["csrf_token"]})
-        yield client
+    try:
+        with TestClient(main.app) as client:
+            response = client.post("/api/auth/login", json={
+                "username": "tester", "password": "test-password-123"
+            })
+            assert response.status_code == 200
+            client.headers.update({"X-CSRF-Token": response.json()["csrf_token"]})
+            yield client
+    finally:
+        gc.collect()
+        temporary_dir.cleanup()
 
 
 def test_maintenance_alerts_include_due_assets_and_validate_window(admin_client):
