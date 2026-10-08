@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -40,6 +41,17 @@ def password_matches(password: str, encoded: str) -> bool:
 
 def public_user(row) -> dict:
     return {key: row[key] for key in ('id', 'username', 'name', 'role', 'is_active', 'created_at')}
+
+
+def record_audit(connect, actor, action: str, entity_type: str, entity_id=None, details: dict | None = None) -> None:
+    actor = dict(actor) if actor is not None else {}
+    with connect() as db:
+        db.execute('''INSERT INTO audit_log
+            (created_at,actor_id,actor_username,action,entity_type,entity_id,details)
+            VALUES(?,?,?,?,?,?,?)''',
+            (int(time.time()), actor.get('id'), actor.get('username', 'system'), action,
+             entity_type, str(entity_id) if entity_id is not None else None,
+             json.dumps(details or {}, ensure_ascii=False)))
 
 
 def setup_auth(connect) -> None:
@@ -172,6 +184,14 @@ def install_auth(app, connect) -> None:
             if user and path != '/api/auth/login' and not hmac.compare_digest(request.headers.get('x-csrf-token', '').encode(), user['csrf_token'].encode()):
                 return JSONResponse({'detail': 'Обновите страницу и повторите действие'}, status_code=403)
         response = await call_next(request)
+        if (user and path.startswith('/api/') and request.method not in ('GET', 'HEAD', 'OPTIONS')
+                and path != '/api/auth/login' and response.status_code < 400):
+            route = request.scope.get('route')
+            route_path = getattr(route, 'path', path)
+            entity_type = route_path.strip('/').split('/')[1] if len(route_path.strip('/').split('/')) > 1 else 'api'
+            entity_id = next(iter(request.path_params.values()), None)
+            record_audit(connect, user, f'{request.method} {route_path}', entity_type, entity_id,
+                         {'status_code': response.status_code})
         if protected or path == '/login':
             response.headers['Cache-Control'] = 'no-store'
             response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -210,6 +230,7 @@ def install_auth(app, connect) -> None:
             db.execute('INSERT INTO auth_sessions VALUES(?,?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), row['id'], csrf, now+SESSION_SECONDS))
             db.execute('DELETE FROM auth_login_attempts WHERE bucket=?', (buckets[0],))
         response.set_cookie(COOKIE, token, max_age=SESSION_SECONDS, httponly=True, secure=os.getenv('AUTH_COOKIE_SECURE', '0') == '1', samesite='strict', path='/')
+        record_audit(connect, dict(row), 'login', 'session', details={'ip': ip})
         return {'user': public_user(row), 'csrf_token': csrf}
 
     @app.get('/api/auth/me')
@@ -265,7 +286,8 @@ def install_auth(app, connect) -> None:
             db.execute('UPDATE auth_users SET is_active=? WHERE id=?', (int(payload.is_active), user_id))
             if not payload.is_active:
                 db.execute('DELETE FROM auth_sessions WHERE user_id=?', (user_id,))
-            return public_user(db.execute('SELECT * FROM auth_users WHERE id=?', (user_id,)).fetchone())
+            result = public_user(db.execute('SELECT * FROM auth_users WHERE id=?', (user_id,)).fetchone())
+        return result
 
     @app.delete('/api/admin/users/{user_id}', status_code=204)
     def delete_user(user_id: int, request: Request):
@@ -282,3 +304,14 @@ def install_auth(app, connect) -> None:
                 if remaining == 0:
                     raise HTTPException(409, 'Нельзя удалить последнего активного администратора')
             db.execute('DELETE FROM auth_users WHERE id=?', (user_id,))
+
+    @app.get('/api/admin/audit')
+    def audit_log(request: Request, limit: int = 100):
+        admin(request)
+        if not 1 <= limit <= 500:
+            raise HTTPException(422, 'limit must be between 1 and 500')
+        with connect() as db:
+            result = [dict(row) for row in db.execute('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?', (limit,))]
+        for item in result:
+            item['details'] = json.loads(item['details'])
+        return result

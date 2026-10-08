@@ -1804,5 +1804,14 @@ select {
 .danger-button{background:#fff0f0;color:var(--red)}
 .comparison-result{margin-top:14px;padding:12px;border-radius:8px;background:#f2f7fb}
 .comparison-result h3{margin-bottom:8px}
+.maintenance-alerts{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.maintenance-alert{display:grid;gap:5px;padding:12px;border-left:4px solid #e6a700;border-radius:6px;background:#fff9e8}
+.maintenance-alert.overdue{border-color:#c62828;background:#fff0f0;color:#8d1717}
+.maintenance-alert span,.maintenance-alert strong{font-size:12px}
+.demo-steps{display:grid;gap:12px;padding-left:24px;line-height:1.55}
+.csv-import{margin-top:18px;padding:14px;border:1px solid #e3e8ee;border-radius:8px;background:#f8fafc}
+.csv-import form{display:grid;gap:10px;margin-top:10px}
+.csv-import input{display:block;margin-top:6px}
+.csv-import .form-error{color:#a11}
 @media(max-width:1150px){.filter-toolbar{margin-left:10px;margin-right:10px}}
 @media(max-width:720px){.filter-toolbar{align-items:stretch}.filter-toolbar label{flex:1 1 42%}.filter-toolbar input,.filter-toolbar select{width:100%}.filter-toolbar button,.filter-toolbar .button-link{flex:1 1 auto;text-align:center}.form-grid{grid-template-columns:1fr}}

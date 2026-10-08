@@ -260,3 +260,21 @@ static/
 Для HTTPS включите `AUTH_COOKIE_SECURE=1` в окружении сервера. Для локального HTTP значение по умолчанию — `0`. За обратным прокси настройте корректную передачу схемы HTTPS и заголовка Host.
 
 `--reload` используется для разработки. При размещении на сервере запускайте приложение без этого параметра.
+
+## Maintenance, CSV import, and action history
+
+- The equipment page shows assets due within 14 days, including overdue maintenance. The API accepts `GET /api/maintenance/alerts?within_days=14`.
+- Administrators can download `/api/import/template.csv` and import up to 5,000 shifts from the shift entry page. Import is validated as a whole before any rows are saved. The CSV columns are `work_date,area,planned_units,actual_units,operating_hours,utilization_percent,produced,defects,equipment,downtime_reason,downtime_minutes,is_critical`.
+- Administrators can review successful sign-ins and successful write requests under **Action log** (`GET /api/admin/audit`). Secrets and request bodies are not stored.
+- **Jury demo** in the navigation gives a short route through the factory overview, recommendations, simulation, maintenance, CSV import, and action log.
+
+## Automated tests
+
+Install development dependencies and run the API feature tests:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The tests use a temporary SQLite database and do not change `factory.db`.

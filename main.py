@@ -82,6 +82,17 @@ def setup_database() -> None:
                 next_maintenance TEXT NOT NULL,
                 notes TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                actor_id INTEGER,
+                actor_username TEXT NOT NULL,
+                action TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT,
+                details TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS audit_log_created_at ON audit_log(created_at DESC);
         """)
         if db.execute("SELECT COUNT(*) FROM line_runs").fetchone()[0] == 0:
             db.executemany("""INSERT INTO line_runs
@@ -211,6 +222,10 @@ class AssetIn(InputModel):
         if self.last_maintenance and self.last_maintenance > self.next_maintenance:
             raise ValueError("Дата следующего ТО должна быть не раньше последнего ТО")
         return self
+
+
+class CSVImportIn(InputModel):
+    content: str = Field(min_length=1, max_length=2_000_000)
 
 
 def rows(query: str, params: tuple = ()) -> list[dict]:
@@ -353,6 +368,75 @@ def add_shift_entry(record: ShiftEntryIn):
     log_event("shift_entry", "warning" if record.downtime_minutes else "info", f"Смена внесена: {record.area}",
               {"date": record.work_date.isoformat(), "actual_units": record.actual_units, "defects": record.defects})
     return {"status": "created", "area": record.area, "work_date": record.work_date.isoformat()}
+
+
+SHIFT_CSV_HEADERS = ("work_date", "area", "planned_units", "actual_units", "operating_hours",
+                     "utilization_percent", "produced", "defects", "equipment",
+                     "downtime_reason", "downtime_minutes", "is_critical")
+
+
+@app.get("/api/import/template.csv")
+def import_template():
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(SHIFT_CSV_HEADERS)
+    writer.writerow((date.today().isoformat(), "Сварка", 120, 118, 7.8, 98, 118, 2, "", "", 0, "true"))
+    return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=shift-import-template.csv"})
+
+
+@app.post("/api/import/csv", status_code=201)
+def import_shift_csv(payload: CSVImportIn):
+    try:
+        reader = csv.DictReader(io.StringIO(payload.content.lstrip("\ufeff")))
+        headers = [header.strip() for header in (reader.fieldnames or [])]
+        if len(headers) != len(set(headers)):
+            raise HTTPException(422, "В CSV есть повторяющиеся названия колонок")
+        if set(SHIFT_CSV_HEADERS) - set(headers):
+            missing = sorted(set(SHIFT_CSV_HEADERS) - set(headers))
+            raise HTTPException(422, f"Не хватает колонок: {', '.join(missing)}")
+        raw_rows = []
+        for row_number, row in enumerate(reader, start=2):
+            if None in row:
+                raise HTTPException(422, f"Строка {row_number}: лишние значения после последней колонки")
+            if any(value and value.strip() for value in row.values()):
+                raw_rows.append(row)
+        if not raw_rows:
+            raise HTTPException(422, "CSV-файл не содержит строк смен")
+        if len(raw_rows) > 5000:
+            raise HTTPException(413, "За один раз можно импортировать не более 5000 смен")
+        records = []
+        for row_number, raw in enumerate(raw_rows, start=2):
+            row = {(key or "").strip(): (value or "").strip() for key, value in raw.items()}
+            critical_text = row.get("is_critical", "true").lower()
+            if critical_text not in ("true", "false", "1", "0", "yes", "no", "да", "нет"):
+                raise ValueError(f"строка {row_number}: is_critical должен быть true/false")
+            record = ShiftEntryIn.model_validate({
+                "work_date": row["work_date"], "area": row["area"],
+                "planned_units": row["planned_units"], "actual_units": row["actual_units"],
+                "operating_hours": row["operating_hours"], "utilization_percent": row["utilization_percent"],
+                "produced": row["produced"], "defects": row["defects"],
+                "equipment": row.get("equipment", ""), "downtime_reason": row.get("downtime_reason", ""),
+                "downtime_minutes": row.get("downtime_minutes") or 0,
+                "is_critical": critical_text not in ("false", "0", "no", "нет"),
+            })
+            records.append(record)
+    except HTTPException:
+        raise
+    except (ValueError, KeyError, csv.Error) as exc:
+        raise HTTPException(422, f"Ошибка CSV: {exc}") from exc
+
+    with connect() as db:
+        for record in records:
+            db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent) VALUES (?,?,?,?,?,?)",
+                       (record.work_date.isoformat(), AREAS[record.area], record.planned_units, record.actual_units, record.operating_hours, record.utilization_percent))
+            db.execute("INSERT INTO quality_records (work_date,area,produced,defects) VALUES (?,?,?,?)",
+                       (record.work_date.isoformat(), record.area, record.produced, record.defects))
+            if record.downtime_minutes:
+                db.execute("INSERT INTO downtimes (work_date,area,equipment,reason,duration_minutes,is_critical) VALUES (?,?,?,?,?,?)",
+                           (record.work_date.isoformat(), record.area, record.equipment, record.downtime_reason, record.downtime_minutes, int(record.is_critical)))
+    log_event("csv_import", "info", "Импорт смен из CSV", {"count": len(records)})
+    return {"status": "imported", "count": len(records)}
 
 
 @app.get("/api/production-flow")
@@ -531,6 +615,21 @@ def get_equipment(area: str | None = None):
         COALESCE((SELECT SUM(d.duration_minutes) FROM downtimes d WHERE d.equipment=a.name),0) AS total_downtime_minutes,
         (SELECT MAX(d.work_date) FROM downtimes d WHERE d.equipment=a.name) AS last_incident
         FROM equipment_assets a{where} ORDER BY a.next_maintenance,a.name""", params)
+
+
+@app.get("/api/maintenance/alerts")
+def maintenance_alerts(within_days: int = 14):
+    if not 0 <= within_days <= 365:
+        raise HTTPException(422, "within_days must be between 0 and 365")
+    today = date.today()
+    cutoff = today + timedelta(days=within_days)
+    items = rows("""SELECT id,name,area,status,next_maintenance FROM equipment_assets
+        WHERE status != 'stopped' AND next_maintenance <= ? ORDER BY next_maintenance,name""", (cutoff.isoformat(),))
+    for item in items:
+        days_left = (date.fromisoformat(item["next_maintenance"]) - today).days
+        item["days_remaining"] = days_left
+        item["urgency"] = "overdue" if days_left < 0 else "due_soon"
+    return {"today": today.isoformat(), "within_days": within_days, "count": len(items), "items": items}
 
 
 @app.post("/api/equipment", status_code=201)
