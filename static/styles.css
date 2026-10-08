@@ -1813,5 +1813,27 @@ select {
 .csv-import form{display:grid;gap:10px;margin-top:10px}
 .csv-import input{display:block;margin-top:6px}
 .csv-import .form-error{color:#a11}
+.action-list,.forecast-grid{display:grid;gap:12px}
+.action-card,.forecast-card,.forecast-method{padding:14px;border:1px solid #e3e8ee;border-radius:8px;background:#fff}
+.action-card{border-left:4px solid #dfaa2b}
+.action-card.critical,.action-card.high,.forecast-card.at_risk{border-left-color:#c62828}
+.action-card.resolved{opacity:.72;border-left-color:#25805a}
+.action-head,.forecast-card>div{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.action-card h3{margin:10px 0 6px}
+.action-card p,.forecast-method p{margin:6px 0}
+.action-controls{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-top:12px}
+.action-controls label{display:grid;gap:4px;font-size:11px}
+.action-controls input,.action-controls select{min-height:34px;padding:7px;border:1px solid #d6dee7;border-radius:5px}
+.forecast-grid{grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+.forecast-card{display:grid;gap:6px}
+.forecast-card.on_track{border-top:3px solid #25805a}
+.forecast-card.at_risk{border-top:3px solid #c62828}
+.forecast-card strong{font-size:20px}
+.forecast-card small,.forecast-method small{color:#66778a;line-height:1.5}
+.forecast-method{margin-top:14px;background:#f8fafc;line-height:1.5}
+.forecast-method ul{margin:8px 0;padding-left:22px}
+.impact-estimate{margin:12px 0;padding:12px;border-left:4px solid #d99a13;border-radius:6px;background:#fff8e6}
+.impact-estimate p{margin:6px 0;color:#536273}
+.impact-estimate strong{display:block;margin-top:6px}
 @media(max-width:1150px){.filter-toolbar{margin-left:10px;margin-right:10px}}
 @media(max-width:720px){.filter-toolbar{align-items:stretch}.filter-toolbar label{flex:1 1 42%}.filter-toolbar input,.filter-toolbar select{width:100%}.filter-toolbar button,.filter-toolbar .button-link{flex:1 1 auto;text-align:center}.form-grid{grid-template-columns:1fr}}

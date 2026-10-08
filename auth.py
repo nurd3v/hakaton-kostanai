@@ -171,8 +171,10 @@ def install_auth(app, connect) -> None:
                 if path == '/':
                     return RedirectResponse('/login', status_code=303)
                 return JSONResponse({'detail': 'Войдите в аккаунт'}, status_code=401, headers={'Cache-Control': 'no-store'})
+            action_workflow_update = request.method == 'PATCH' and path.startswith('/api/actions/')
             if (path.startswith('/api/admin/') or path in ('/docs', '/redoc', '/openapi.json') or
-                (request.method not in ('GET', 'HEAD', 'OPTIONS') and not path.startswith('/api/auth/'))) and user['role'] != 'admin':
+                (request.method not in ('GET', 'HEAD', 'OPTIONS') and not path.startswith('/api/auth/')
+                 and not action_workflow_update)) and user['role'] != 'admin':
                 return JSONResponse({'detail': 'Доступ только для администратора'}, status_code=403)
         if path.startswith('/api/') and request.method not in ('GET', 'HEAD', 'OPTIONS'):
             # A same-origin JSON client plus session-bound CSRF token protects cookie-authenticated writes.

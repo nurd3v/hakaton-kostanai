@@ -264,7 +264,7 @@ static/
 ## Maintenance, CSV import, and action history
 
 - The equipment page shows assets due within 14 days, including overdue maintenance. The API accepts `GET /api/maintenance/alerts?within_days=14`.
-- Administrators can download `/api/import/template.csv` and import up to 5,000 shifts from the shift entry page. Import is validated as a whole before any rows are saved. The CSV columns are `work_date,area,planned_units,actual_units,operating_hours,utilization_percent,produced,defects,equipment,downtime_reason,downtime_minutes,is_critical`.
+- Administrators can download `/api/import/template.csv` and import up to 5,000 shifts from the shift entry page. Import is validated as a whole before any rows are saved. The CSV columns are `work_date,area,planned_units,actual_units,operating_hours,elapsed_shift_hours,utilization_percent,produced,defects,equipment,downtime_reason,downtime_minutes,is_critical`.
 - Administrators can review successful sign-ins and successful write requests under **Action log** (`GET /api/admin/audit`). Secrets and request bodies are not stored.
 - **Jury demo** in the navigation gives a short route through the factory overview, recommendations, simulation, maintenance, CSV import, and action log.
 
@@ -278,3 +278,10 @@ python -m pytest -q
 ```
 
 The tests use a temporary SQLite database and do not change `factory.db`.
+
+## Action center and shift forecast
+
+- The **Action center** combines active dashboard alerts, production recommendations, and maintenance due dates. Signed-in team members can assign an owner and move an item through new, in progress, and resolved. The status is retained when the page refreshes.
+- The **Shift output forecast** projects each area's output to an eight-hour shift using actual units divided by elapsed shift hours. Enter elapsed shift time in a shift record or in the new optional CSV column `elapsed_shift_hours` to get a mid-shift estimate. Older CSV files remain accepted and default to a completed eight-hour shift.
+- The forecast shows its latest record date, data source, and data quality. It assumes output pace stays constant and does not account for future downtime or staffing changes; it is a transparent calculation, not machine learning.
+- A simulation result includes an explicitly labeled estimate. The failure example assumes output can recover from 78 to the plan of 120; it does not claim measured savings.

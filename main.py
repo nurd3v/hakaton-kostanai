@@ -7,6 +7,7 @@ import json
 import csv
 import io
 import sqlite3
+from typing import Literal
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -42,7 +43,9 @@ def setup_database() -> None:
                 planned_units INTEGER NOT NULL CHECK(planned_units >= 0),
                 actual_units INTEGER NOT NULL CHECK(actual_units >= 0),
                 operating_hours REAL NOT NULL CHECK(operating_hours >= 0),
-                utilization_percent REAL NOT NULL CHECK(utilization_percent BETWEEN 0 AND 100)
+                utilization_percent REAL NOT NULL CHECK(utilization_percent BETWEEN 0 AND 100),
+                elapsed_shift_hours REAL NOT NULL DEFAULT 8 CHECK(elapsed_shift_hours BETWEEN 0 AND 24),
+                data_source TEXT NOT NULL DEFAULT 'actual'
             );
             CREATE TABLE IF NOT EXISTS downtimes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +96,28 @@ def setup_database() -> None:
                 details TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS audit_log_created_at ON audit_log(created_at DESC);
+            CREATE TABLE IF NOT EXISTS action_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT NOT NULL UNIQUE,
+                source_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                area TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                recommended_action TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','in_progress','resolved')),
+                assigned_to TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS action_items_status ON action_items(active,status,priority);
         """)
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(line_runs)")}
+        if "elapsed_shift_hours" not in columns:
+            db.execute("ALTER TABLE line_runs ADD COLUMN elapsed_shift_hours REAL NOT NULL DEFAULT 8")
+        if "data_source" not in columns:
+            db.execute("ALTER TABLE line_runs ADD COLUMN data_source TEXT NOT NULL DEFAULT 'actual'")
         if db.execute("SELECT COUNT(*) FROM line_runs").fetchone()[0] == 0:
             db.executemany("""INSERT INTO line_runs
                 (work_date,line,planned_units,actual_units,operating_hours,utilization_percent)
@@ -187,6 +211,7 @@ class ShiftEntryIn(InputModel):
     planned_units: int = Field(ge=0)
     actual_units: int = Field(ge=0)
     operating_hours: float = Field(ge=0, le=24)
+    elapsed_shift_hours: float = Field(default=8, ge=0, le=24)
     utilization_percent: float = Field(ge=0, le=100)
     produced: int = Field(ge=0)
     defects: int = Field(ge=0)
@@ -358,8 +383,8 @@ def add_quality(record: QualityIn):
 def add_shift_entry(record: ShiftEntryIn):
     line_name = AREAS[record.area]
     with connect() as db:
-        db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent) VALUES (?,?,?,?,?,?)",
-                   (record.work_date.isoformat(), line_name, record.planned_units, record.actual_units, record.operating_hours, record.utilization_percent))
+        db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent,elapsed_shift_hours,data_source) VALUES (?,?,?,?,?,?,?,'manual')",
+                   (record.work_date.isoformat(), line_name, record.planned_units, record.actual_units, record.operating_hours, record.utilization_percent, record.elapsed_shift_hours))
         db.execute("INSERT INTO quality_records (work_date,area,produced,defects) VALUES (?,?,?,?)",
                    (record.work_date.isoformat(), record.area, record.produced, record.defects))
         if record.downtime_minutes:
@@ -371,8 +396,9 @@ def add_shift_entry(record: ShiftEntryIn):
 
 
 SHIFT_CSV_HEADERS = ("work_date", "area", "planned_units", "actual_units", "operating_hours",
-                     "utilization_percent", "produced", "defects", "equipment",
+                     "elapsed_shift_hours", "utilization_percent", "produced", "defects", "equipment",
                      "downtime_reason", "downtime_minutes", "is_critical")
+SHIFT_CSV_REQUIRED_HEADERS = set(SHIFT_CSV_HEADERS) - {"elapsed_shift_hours"}
 
 
 @app.get("/api/import/template.csv")
@@ -380,7 +406,7 @@ def import_template():
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow(SHIFT_CSV_HEADERS)
-    writer.writerow((date.today().isoformat(), "Сварка", 120, 118, 7.8, 98, 118, 2, "", "", 0, "true"))
+    writer.writerow((date.today().isoformat(), "Сварка", 120, 118, 7.8, 8, 98, 118, 2, "", "", 0, "true"))
     return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": "attachment; filename=shift-import-template.csv"})
 
@@ -392,8 +418,9 @@ def import_shift_csv(payload: CSVImportIn):
         headers = [header.strip() for header in (reader.fieldnames or [])]
         if len(headers) != len(set(headers)):
             raise HTTPException(422, "В CSV есть повторяющиеся названия колонок")
-        if set(SHIFT_CSV_HEADERS) - set(headers):
-            missing = sorted(set(SHIFT_CSV_HEADERS) - set(headers))
+        reader.fieldnames = headers
+        if SHIFT_CSV_REQUIRED_HEADERS - set(headers):
+            missing = sorted(SHIFT_CSV_REQUIRED_HEADERS - set(headers))
             raise HTTPException(422, f"Не хватает колонок: {', '.join(missing)}")
         raw_rows = []
         for row_number, row in enumerate(reader, start=2):
@@ -414,7 +441,8 @@ def import_shift_csv(payload: CSVImportIn):
             record = ShiftEntryIn.model_validate({
                 "work_date": row["work_date"], "area": row["area"],
                 "planned_units": row["planned_units"], "actual_units": row["actual_units"],
-                "operating_hours": row["operating_hours"], "utilization_percent": row["utilization_percent"],
+                "operating_hours": row["operating_hours"], "elapsed_shift_hours": row.get("elapsed_shift_hours") or 8,
+                "utilization_percent": row["utilization_percent"],
                 "produced": row["produced"], "defects": row["defects"],
                 "equipment": row.get("equipment", ""), "downtime_reason": row.get("downtime_reason", ""),
                 "downtime_minutes": row.get("downtime_minutes") or 0,
@@ -428,8 +456,8 @@ def import_shift_csv(payload: CSVImportIn):
 
     with connect() as db:
         for record in records:
-            db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent) VALUES (?,?,?,?,?,?)",
-                       (record.work_date.isoformat(), AREAS[record.area], record.planned_units, record.actual_units, record.operating_hours, record.utilization_percent))
+            db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent,elapsed_shift_hours,data_source) VALUES (?,?,?,?,?,?,?,'imported')",
+                       (record.work_date.isoformat(), AREAS[record.area], record.planned_units, record.actual_units, record.operating_hours, record.utilization_percent, record.elapsed_shift_hours))
             db.execute("INSERT INTO quality_records (work_date,area,produced,defects) VALUES (?,?,?,?)",
                        (record.work_date.isoformat(), record.area, record.produced, record.defects))
             if record.downtime_minutes:
@@ -563,6 +591,11 @@ class EventNoteIn(InputModel):
     details: dict = Field(default_factory=dict)
 
 
+class ActionUpdateIn(InputModel):
+    status: Literal["new", "in_progress", "resolved"]
+    assigned_to: str = Field(default="", max_length=100)
+
+
 @app.get("/")
 def dashboard_page():
     return FileResponse("static/index.html")
@@ -630,6 +663,125 @@ def maintenance_alerts(within_days: int = 14):
         item["days_remaining"] = days_left
         item["urgency"] = "overdue" if days_left < 0 else "due_soon"
     return {"today": today.isoformat(), "within_days": within_days, "count": len(items), "items": items}
+
+
+def sync_action_items() -> None:
+    now = int(datetime.now(timezone.utc).timestamp())
+    generated = []
+    dashboard_data = dashboard()
+    action_text = {
+        "LOW_OEE": "Inspect the bottleneck and compare the affected shift metrics.",
+        "HIGH_DEFECT_RATE": "Check process settings and strengthen first-piece inspection.",
+        "CRITICAL_DOWNTIME": "Assign an equipment diagnosis and record the failure cause.",
+        "LOW_MONTHLY_PLAN": "Review the production plan with the factory team.",
+    }
+    for alert in dashboard_data["alerts"]:
+        identity = alert.get("area") or alert.get("equipment") or alert.get("date") or "factory"
+        generated.append({
+            "source_key": f"alert:{alert['code']}:{identity}", "source_type": "alert",
+            "title": alert["message"], "area": alert.get("area", ""),
+            "priority": alert["severity"], "reason": alert["message"],
+            "recommended_action": action_text.get(alert["code"], "Review the production metrics."),
+        })
+    for tip in recommendations():
+        if tip.get("type") == "operations":
+            continue
+        generated.append({
+            "source_key": f"recommendation:{tip['type']}:{tip.get('area', 'factory')}",
+            "source_type": "recommendation", "title": tip["title"],
+            "area": tip.get("area", ""), "priority": tip["priority"],
+            "reason": tip["reason"], "recommended_action": tip["action"],
+        })
+    for item in maintenance_alerts()["items"]:
+        generated.append({
+            "source_key": f"maintenance:{item['id']}", "source_type": "maintenance",
+            "title": f"Maintenance: {item['name']}", "area": item["area"],
+            "priority": "critical" if item["urgency"] == "overdue" else "warning",
+            "reason": f"Maintenance due {item['next_maintenance']} ({item['days_remaining']} days).",
+            "recommended_action": "Assign the maintenance work and update the asset record when complete.",
+        })
+    with connect() as db:
+        db.execute("UPDATE action_items SET active=0")
+        for item in generated:
+            db.execute("""INSERT INTO action_items
+                (source_key,source_type,title,area,priority,reason,recommended_action,active,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,1,?,?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    source_type=excluded.source_type,title=excluded.title,area=excluded.area,
+                    priority=excluded.priority,reason=excluded.reason,
+                    recommended_action=excluded.recommended_action,active=1,updated_at=excluded.updated_at""",
+                (item["source_key"], item["source_type"], item["title"], item["area"],
+                 item["priority"], item["reason"], item["recommended_action"], now, now))
+
+
+@app.get("/api/actions")
+def get_actions():
+    sync_action_items()
+    return rows("""SELECT * FROM action_items
+        WHERE active=1 OR status IN ('in_progress','resolved')
+        ORDER BY active DESC, CASE status WHEN 'new' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
+                 CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END,
+                 updated_at DESC LIMIT 100""")
+
+
+@app.patch("/api/actions/{action_id}")
+def update_action(action_id: int, payload: ActionUpdateIn):
+    with connect() as db:
+        cursor = db.execute("""UPDATE action_items SET status=?,assigned_to=?,updated_at=? WHERE id=?""",
+                            (payload.status, payload.assigned_to.strip(), int(datetime.now(timezone.utc).timestamp()), action_id))
+        if not cursor.rowcount:
+            raise HTTPException(404, "Action not found")
+        return dict(db.execute("SELECT * FROM action_items WHERE id=?", (action_id,)).fetchone())
+
+
+@app.get("/api/production-forecast")
+def production_forecast(area: str | None = None):
+    if area and area not in AREAS:
+        raise HTTPException(422, "Unknown production area")
+    with connect() as db:
+        latest = db.execute("SELECT MAX(work_date) FROM line_runs").fetchone()[0]
+        if not latest:
+            return {
+                "work_date": None, "shift_hours": 8, "method": "linear_pace", "areas": [],
+                "method_label": "Current output / elapsed shift hours x 8-hour shift",
+                "assumptions": ["Output pace remains constant for the rest of the shift."],
+                "limitation": "No shift records are available yet. This is a transparent calculation, not a machine-learning forecast.",
+            }
+        params = [latest]
+        where_area = ""
+        if area:
+            where_area = " AND line=?"
+            params.append(AREAS[area])
+        recorded = {row["line"]: dict(row) for row in db.execute(f"""SELECT line,
+            SUM(planned_units) planned_units,SUM(actual_units) actual_units,
+            MAX(elapsed_shift_hours) elapsed_shift_hours,MAX(operating_hours) operating_hours,
+            GROUP_CONCAT(DISTINCT data_source) data_sources
+            FROM line_runs WHERE work_date=?{where_area} GROUP BY line""", params)}
+    forecast_areas = []
+    for area_name, line_name in AREAS.items():
+        item = recorded.get(line_name)
+        if not item:
+            continue
+        elapsed = item["elapsed_shift_hours"]
+        actual = item["actual_units"]
+        projected = round(actual / elapsed * 8, 1) if elapsed and elapsed > 0 else None
+        plan = item["planned_units"]
+        gap = max(0, round(plan - projected, 1)) if projected is not None else None
+        data_quality = "good" if elapsed >= 4 and plan > 0 else "limited"
+        forecast_areas.append({
+            "area": area_name, "planned_units": plan, "actual_units": actual,
+            "elapsed_shift_hours": elapsed, "projected_units": projected,
+            "projected_gap": gap,
+            "status": "no_data" if projected is None else "at_risk" if projected < plan * 0.95 else "on_track",
+            "data_quality": data_quality, "data_sources": item["data_sources"].split(","),
+        })
+    return {
+        "work_date": latest, "shift_hours": 8, "method": "linear_pace",
+        "method_label": "Current output / elapsed shift hours x 8-hour shift",
+        "assumptions": ["Output pace remains constant for the rest of the shift.", "Future failures, changeovers, and staffing changes are not included."],
+        "limitation": "This is a calculation from the latest shift entry, not a machine-learning forecast. Enter elapsed shift time to forecast before the shift ends.",
+        "areas": [item for item in forecast_areas if not area or item["area"] == area],
+    }
 
 
 @app.post("/api/equipment", status_code=201)
@@ -721,7 +873,7 @@ def simulate_shift(request: SimulationIn):
         actual, utilization = values[area]
         defects = 8 if scenario == "quality" and area == "\u041e\u043a\u0440\u0430\u0441\u043a\u0430" else {"\u0421\u0432\u0430\u0440\u043a\u0430": 2, "\u041e\u043a\u0440\u0430\u0441\u043a\u0430": 2, "\u0421\u0431\u043e\u0440\u043a\u0430": 1}[area]
         with connect() as db:
-            db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent) VALUES (?,?,?,?,?,?)", (work_day.isoformat(), line_name, 120, actual, round(8 * utilization / 100, 1), utilization))
+            db.execute("INSERT INTO line_runs (work_date,line,planned_units,actual_units,operating_hours,utilization_percent,elapsed_shift_hours,data_source) VALUES (?,?,?,?,?,?,8,'simulation')", (work_day.isoformat(), line_name, 120, actual, round(8 * utilization / 100, 1), utilization))
             db.execute("INSERT INTO quality_records (work_date,area,produced,defects) VALUES (?,?,?,?)", (work_day.isoformat(), area, actual, defects))
     if scenario == "failure":
         values["Сборка"] = (78, 67.0)
@@ -737,18 +889,40 @@ def simulate_shift(request: SimulationIn):
     comparison = {key: {"before": previous["kpis"][key], "after": current["kpis"][key],
                         "change": round(current["kpis"][key] - previous["kpis"][key], 2)}
                   for key in comparison_keys}
-    recommendations = {
-        "failure": {"action": "Проверить вентилятор камеры окраски и выполнить внеплановое ТО.",
-                    "expected_effect": "После устранения узкого места выпуск может вернуться к штатному уровню около 120 автомобилей за смену."},
-        "quality": {"action": "Проверить настройки камеры окраски и усилить контроль первой детали после переналадки.",
-                    "expected_effect": "Целевой уровень брака — не более 2%; достижение цели нужно подтвердить следующей сменой."},
-        "normal": {"action": "Продолжать мониторинг загрузки и качества участков.",
-                   "expected_effect": "Сохранить выпуск около 120 автомобилей за смену при текущих настройках."},
-    }
+    if scenario == "failure":
+        estimated_impact = {
+            "estimated_preventable_downtime_minutes": 68,
+            "estimated_downtime_hours": round(68 / 60, 2),
+            "estimated_recovered_units_per_shift": 42,
+            "label": "Scenario estimate, not measured savings",
+            "basis": "Simulated paint output is 78 against a plan of 120; estimate assumes full recovery to plan.",
+        }
+    elif scenario == "quality":
+        estimated_impact = {
+            "estimated_preventable_defects": 6,
+            "label": "Scenario estimate, not measured savings",
+            "basis": "The scenario has 8 defects versus 2 in the baseline at comparable output.",
+        }
+    else:
+        estimated_impact = {
+            "estimated_preventable_downtime_minutes": 0,
+            "estimated_recovered_units_per_shift": 0,
+            "label": "No deviation modeled",
+            "basis": "This scenario does not define additional losses.",
+        }
+    scenario_recommendation = {
+        "failure": {"action": "Inspect the paint booth fan and schedule maintenance.",
+                    "expected_effect": "The estimate assumes output can recover from 78 to the planned 120 units per shift."},
+        "quality": {"action": "Check paint settings and inspect the first item after adjustment.",
+                    "expected_effect": "Compare the next shift defect rate with the 2% target."},
+        "normal": {"action": "Continue monitoring utilization and quality.",
+                   "expected_effect": "Maintain the current planned shift output."},
+    }[scenario]
     log_event("simulation_comparison", "info", "Сравнение смен до и после симуляции",
-              {"date": work_day.isoformat(), "scenario": scenario, "comparison": comparison, "recommendation": recommendations[scenario]})
+              {"date": work_day.isoformat(), "scenario": scenario, "comparison": comparison, "recommendation": scenario_recommendation})
     return {"date": work_day.isoformat(), "scenario": scenario, "dashboard": current,
-            "comparison": comparison, "recommendation": recommendations[scenario]}
+            "comparison": comparison, "recommendation": scenario_recommendation,
+            "estimated_impact": estimated_impact}
 
 
 @app.post("/api/simulation/reset")

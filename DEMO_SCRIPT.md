@@ -2,7 +2,7 @@
 
 ## Short route in the app
 
-Open the **Jury demo** page from the sidebar and follow its four steps. Run the failure simulation from that page, then show the equipment maintenance reminders and administrator action log. The **Shift entry** page includes a downloadable CSV template and bulk import.
+Open the **Jury demo** page from the sidebar and follow its steps. Run the failure simulation and point out the labeled estimate of downtime and recovered output. Then show the **Shift output forecast** with its data source and assumptions, and assign an owner to one item in the **Action center**. Finish with maintenance reminders and the administrator action log. The **Shift entry** page includes a downloadable CSV template and bulk import.
 
 1. **Показать обзор.** «Это цифровой двойник завода Allur: в одном окне видны выпуск, оценка OEE, качество и простои. Схема отражает поток от склада до контроля качества».
 2. **Открыть участок окраски.** «Можно выбрать этап и посмотреть его загрузку, брак, оборудование и простои. Рекомендации объясняют, где проблема и что проверить оператору».
